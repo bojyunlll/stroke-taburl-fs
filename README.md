@@ -47,8 +47,9 @@ Python 3.10+ and the packages in `requirements.txt`:
 pip install -r requirements.txt
 ```
 
-The analysis was run on CPU; a GPU (`--device cuda:0`) only accelerates the policy network.
-The run time is dominated by the CV fitness evaluations, which are parallelized with `--n_jobs`.
+A GPU is strongly recommended for the policy network (`--device cuda:0`, about 3 GB of GPU memory
+per run). On CPU the PPO update of the Transformer attends over all 3,000 candidate features and can
+use 30-55 GB of RAM per run. The CV fitness evaluations run on CPU and are parallelized with `--n_jobs`.
 
 ## Data
 
@@ -67,16 +68,16 @@ The data are available from GEO under accession GSE69138. The preprocessed matri
 
 ```bash
 # 1. TabuRL-FS with each classifier (can be run as three separate processes)
-python run_stroke.py select --clf LinearSVC --n_jobs 8
-python run_stroke.py select --clf LogReg    --n_jobs 8
-python run_stroke.py select --clf SVM_RBF   --n_jobs 8
+python run_stroke.py select --clf LinearSVC --n_jobs 8 --device cuda:0
+python run_stroke.py select --clf LogReg    --n_jobs 8 --device cuda:0
+python run_stroke.py select --clf SVM_RBF   --n_jobs 8 --device cuda:0
 
 # 2. Consensus features, Table 1 and Figures 2-4
 python run_stroke.py evaluate
 
 # 3. 100 repeated runs and Figure 5 (resumable; can be split across processes)
-python run_stroke.py recurrence --runs 0 50  --n_jobs 8
-python run_stroke.py recurrence --runs 50 100 --n_jobs 8
+python run_stroke.py recurrence --runs 0 50  --n_jobs 8 --device cuda:0
+python run_stroke.py recurrence --runs 50 100 --n_jobs 8 --device cuda:0
 python run_stroke.py recurrence --plot_only
 ```
 

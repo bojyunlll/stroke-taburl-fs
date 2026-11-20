@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 PY=${PY:-python}
 N_JOBS=${N_JOBS:-8}
-DEVICE=${DEVICE:-cpu}
+DEVICE=${DEVICE:-cuda:0}
 mkdir -p logs
 
 for clf in LinearSVC LogReg SVM_RBF; do
