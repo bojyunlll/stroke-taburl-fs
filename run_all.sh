@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run the complete analysis: TabuRL-FS (3 classifiers) -> Table 1 / Figures 2-4 -> 100-run recurrence / Figure 5
+# Run the complete analysis: TabuRL-FS (3 classifiers) -> full-pipeline permutation test -> Table 1 / Figures 2-4 -> 100-run recurrence / Figure 5
 set -euo pipefail
 cd "$(dirname "$0")"
 PY=${PY:-python}
@@ -10,6 +10,8 @@ mkdir -p logs
 for clf in LinearSVC LogReg SVM_RBF; do
   $PY -u run_stroke.py select --clf "$clf" --n_jobs "$N_JOBS" --device "$DEVICE" 2>&1 | tee "logs/select_${clf}.log"
 done
+
+$PY -u run_stroke.py permutation --n_jobs "$N_JOBS" --device "$DEVICE" 2>&1 | tee logs/permutation.log
 
 $PY -u run_stroke.py evaluate 2>&1 | tee logs/evaluate.log
 

@@ -7,23 +7,29 @@ Pipeline (matches the Methods section of the manuscript):
      as the wrapped classifier (k = 70 CpGs, 3,000 iterations, 5x5 CV balanced-accuracy fitness).
   3. Consensus features = CpGs selected by at least 2 of the 3 classifiers.
   4. Stratified 70:30 hold-out split (test n = 120: 42 SAD / 40 LAA / 38 CE). The three evaluation
-     classifiers are trained on the training set only and scored on the test set
-     (accuracy, macro F1 / precision / recall, row-normalized confusion matrix),
-     with a label-permutation test (p = (b + 1) / (n_perm + 1)).
+     classifiers are trained on the training set only and scored on the test set: accuracy, balanced
+     accuracy, macro F1 / precision / recall with percentile-bootstrap 95% CIs, per-class metrics,
+     row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
+     Significance is assessed by a full-pipeline permutation test: labels are shuffled and the whole
+     pipeline (ANOVA, TabuRL-FS x 3, consensus, evaluation) is re-run; p = (b + 1) / (n_perm + 1).
   5. Hierarchical clustering heatmap of the consensus CpGs.
   6. Stability: TabuRL-FS is repeated 100 times (seeds 0..99); in each run the CpGs in the
      intersection of the three classifier-specific subsets are recorded and their recurrence counted.
 
 Phases:
-  select      run TabuRL-FS for one or more classifiers (steps 1-2); results are cached as JSON
-  evaluate    consensus + hold-out evaluation + Table 1 and Figures 2-4 (steps 3-5)
-  recurrence  repeated runs and Figure 5 (step 6); resumable, can be split across processes with --runs
+  select       run TabuRL-FS for one or more classifiers (steps 1-2); results are cached as JSON
+  permutation  full-pipeline permutation test (step 4); resumable, split across processes with --perms
+  evaluate     consensus + hold-out evaluation + Table 1 and Figures 2-4 (steps 3-5);
+               includes permutation p-values for all permutations finished so far
+  recurrence   repeated runs and Figure 5 (step 6); resumable, can be split across processes with --runs
 
 By default feature selection uses all 400 samples (--fs_data all), as in the manuscript.
 Use --fs_data train to restrict feature selection to the training split.
 
 Examples:
   python run_stroke.py select --clf LinearSVC LogReg SVM_RBF --n_jobs 8
+  python run_stroke.py permutation --perms 0 500 --device cuda:0
+  python run_stroke.py permutation --perms 500 1000 --device cuda:1
   python run_stroke.py evaluate
   python run_stroke.py recurrence --runs 0 50 --n_jobs 8
   python run_stroke.py recurrence --runs 50 100 --n_jobs 8
@@ -47,7 +53,9 @@ from scipy.spatial.distance import pdist
 from sklearn.base import clone
 from sklearn.feature_selection import f_classif
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score
+from scipy.stats import binomtest
+from sklearn.metrics import (accuracy_score, balanced_accuracy_score, confusion_matrix, f1_score,
+                             precision_recall_fscore_support, precision_score, recall_score)
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
@@ -101,11 +109,10 @@ def feature_path(args, clf_name, seed, subdir="features"):
     return Path(args.out) / subdir / f"{fs_scope(args)}_{clf_name}_k{args.k}_seed{seed}.json"
 
 
-def fs_samples(args, X, y):
-    """Samples used for feature selection: all samples, or only the training split."""
+def fs_samples(args, X, y, tr):
+    """Samples used for feature selection: all samples, or only the training split ``tr``."""
     if args.fs_data == "all":
         return X, y
-    tr, _ = holdout_split(y, args.test_size, args.split_seed)
     return X[tr], y[tr]
 
 
@@ -141,31 +148,68 @@ def get_or_run(path, X, y, probes, clf_name, seed, args):
 # Evaluation
 # ==============================================================================
 
-def evaluate_holdout(X, y, tr, te, cols, n_perm, perm_seed):
-    """Hold-out metrics for each evaluation classifier plus an empirical permutation p-value."""
-    rows, preds = [], {}
-    for name, clf in EVAL_MODELS.items():
-        pipe = make_pipeline(StandardScaler(), clone(clf)).fit(X[tr][:, cols], y[tr])
-        pred = pipe.predict(X[te][:, cols])
-        preds[name] = pred
-        rows.append(dict(Model=name,
-                         Test_accuracy=accuracy_score(y[te], pred),
-                         F1_score=f1_score(y[te], pred, average="macro"),
-                         Precision=precision_score(y[te], pred, average="macro"),
-                         Recall=recall_score(y[te], pred, average="macro")))
+def summary_metrics(y_true, pred):
+    return dict(Test_accuracy=accuracy_score(y_true, pred),
+                Balanced_accuracy=balanced_accuracy_score(y_true, pred),
+                F1_score=f1_score(y_true, pred, average="macro"),
+                Precision=precision_score(y_true, pred, average="macro", zero_division=0),
+                Recall=recall_score(y_true, pred, average="macro"))
 
-    # Permutation test: shuffle all labels, refit on the training split, score on the test split
-    rng = np.random.default_rng(perm_seed)
-    for row, (name, clf) in zip(rows, EVAL_MODELS.items()):
-        null = []
-        for _ in range(n_perm):
-            yp = rng.permutation(y)
-            pipe = make_pipeline(StandardScaler(), clone(clf)).fit(X[tr][:, cols], yp[tr])
-            null.append(accuracy_score(yp[te], pipe.predict(X[te][:, cols])))
-        b = int(np.sum(np.asarray(null) >= row["Test_accuracy"]))
-        row["Permutation_p"] = (b + 1) / (n_perm + 1)
-        row["Null_mean_accuracy"] = float(np.mean(null))
-    return pd.DataFrame(rows), preds
+
+def predict_holdout(X, y, tr, te, cols):
+    """Fit every evaluation classifier on the training split and predict the test split.
+    With no features (empty consensus) the prediction is the majority class of the training split."""
+    preds = {}
+    for name, clf in EVAL_MODELS.items():
+        if len(cols) == 0:
+            preds[name] = np.full(len(te), np.bincount(y[tr]).argmax())
+            continue
+        pipe = make_pipeline(StandardScaler(), clone(clf)).fit(X[tr][:, cols], y[tr])
+        preds[name] = pipe.predict(X[te][:, cols])
+    return preds
+
+
+def bootstrap_ci(y_true, preds, n_boot, seed, alpha=0.05):
+    """Percentile bootstrap CIs (test samples resampled with replacement) for accuracy and balanced accuracy,
+    and for the pairwise differences between classifiers (same resamples for all classifiers)."""
+    rng = np.random.default_rng(seed)
+    names = list(preds)
+    stats = {(n, m): [] for n in names for m in ("acc", "bal")}
+    for _ in range(n_boot):
+        idx = rng.integers(0, len(y_true), len(y_true))
+        for n in names:
+            stats[(n, "acc")].append(accuracy_score(y_true[idx], preds[n][idx]))
+            stats[(n, "bal")].append(balanced_accuracy_score(y_true[idx], preds[n][idx]))
+    q = [100 * alpha / 2, 100 * (1 - alpha / 2)]
+    ci = {k: np.percentile(v, q) for k, v in stats.items()}
+    diff_ci = {}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            for m in ("acc", "bal"):
+                diff_ci[(a, b, m)] = np.percentile(np.subtract(stats[(a, m)], stats[(b, m)]), q)
+    return ci, diff_ci
+
+
+def mcnemar_exact(y_true, pred_a, pred_b):
+    """Exact (binomial) McNemar test on the discordant correct/incorrect pairs of two classifiers."""
+    a_ok, b_ok = pred_a == y_true, pred_b == y_true
+    n01, n10 = int(np.sum(a_ok & ~b_ok)), int(np.sum(~a_ok & b_ok))
+    p = binomtest(n01, n01 + n10, 0.5).pvalue if n01 + n10 > 0 else 1.0
+    return n01, n10, p
+
+
+def per_class_table(y_true, preds):
+    rows = []
+    for name, pred in preds.items():
+        prec, rec, f1, sup = precision_recall_fscore_support(y_true, pred, labels=range(len(CLASS_NAMES)),
+                                                             zero_division=0)
+        cm = confusion_matrix(y_true, pred, labels=range(len(CLASS_NAMES)))
+        for c, cname in enumerate(CLASS_NAMES):
+            tn = cm.sum() - cm[c].sum() - cm[:, c].sum() + cm[c, c]
+            rows.append(dict(Model=name, Class=cname, N=int(sup[c]), Precision=prec[c],
+                             Recall_sensitivity=rec[c], Specificity=tn / (tn + cm[:, c].sum() - cm[c, c]),
+                             F1_score=f1[c]))
+    return pd.DataFrame(rows)
 
 
 def plot_confusion(y_te, preds, path):
@@ -201,8 +245,10 @@ def plot_metrics(table, path):
     ax.set_ylim(lo, max(0.85, table[metrics].to_numpy().max() + 0.05))
     ax.set_ylabel("Performance score")
     ax.set_title("Figure 3. Comparative performance")
-    pvals = ", ".join(f"{r.Model} p={r.Permutation_p:.4f}" for r in table.itertuples())
-    ax.text(0.5, -0.18, f"Permutation test: {pvals}", transform=ax.transAxes, ha="center", fontsize=9)
+    if "Permutation_p_accuracy" in table:
+        pvals = ", ".join(f"{r.Model} p={r.Permutation_p_accuracy:.4f}" for r in table.itertuples())
+        ax.text(0.5, -0.18, f"Full-pipeline permutation test ({int(table.N_permutations.iloc[0])} permutations): "
+                f"{pvals}", transform=ax.transAxes, ha="center", fontsize=9)
     ax.legend(frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.12))
     fig.tight_layout()
     fig.savefig(path, dpi=300, bbox_inches="tight")
@@ -283,12 +329,62 @@ def plot_recurrence(freq, n_runs, path):
 # Phases
 # ==============================================================================
 
+def consensus_of(selected, min_votes=2):
+    votes = Counter(f for s in selected.values() for f in s)
+    return sorted(f for f, c in votes.items() if c >= min_votes), votes
+
+
 def phase_select(args):
     X, y, probes, _ = load_data(args.data)
-    X_fs, y_fs = fs_samples(args, X, y)
+    tr, _ = holdout_split(y, args.test_size, args.split_seed)
+    X_fs, y_fs = fs_samples(args, X, y, tr)
     for clf_name in args.clf:
         names = get_or_run(feature_path(args, clf_name, args.seed), X_fs, y_fs, probes, clf_name, args.seed, args)
         print(f"{clf_name}: {len(names)} CpGs -> {feature_path(args, clf_name, args.seed)}", flush=True)
+
+
+def permutation_dir(args, i):
+    return f"permutation/perm{i:04d}"
+
+
+def phase_permutation(args):
+    """
+    Full-pipeline permutation test. For permutation i the labels of all samples are shuffled once
+    (seed = perm_seed + i), and the complete pipeline is re-run with the shuffled labels:
+    ANOVA pool -> TabuRL-FS with the three classifiers -> consensus -> hold-out evaluation on the same
+    train/test split, scored against the same shuffled labels. Because feature selection is repeated on
+    the shuffled labels, the null distribution includes any optimism of the feature-selection step.
+    Resumable; permutations START..STOP-1 can be distributed over several processes with --perms.
+    """
+    out = Path(args.out)
+    X, y, probes, _ = load_data(args.data)
+    tr, te = holdout_split(y, args.test_size, args.split_seed)
+    lookup = {p: i for i, p in enumerate(probes)}
+    start, stop = args.perms
+    for i in range(start, stop):
+        score_path = out / permutation_dir(args, i) / f"{fs_scope(args)}_k{args.k}_scores.json"
+        if score_path.exists() and not args.force:
+            continue
+        y_perm = np.random.default_rng(args.perm_seed + i).permutation(y)
+        X_fs, y_fs = fs_samples(args, X, y_perm, tr)
+        selected = {c: get_or_run(feature_path(args, c, args.seed, subdir=permutation_dir(args, i)),
+                                  X_fs, y_fs, probes, c, args.seed, args) for c in FS_MODELS}
+        consensus, _ = consensus_of(selected)
+        cols = np.array([lookup[f] for f in consensus], dtype=int)
+        preds = predict_holdout(X, y_perm, tr, te, cols)
+        scores = {name: summary_metrics(y_perm[te], pred) for name, pred in preds.items()}
+        score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), scores=scores), indent=2))
+        print(f"[permutation {i}] consensus={len(consensus)} | "
+              + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in scores.items()), flush=True)
+
+
+def load_permutation_null(args):
+    rows = []
+    for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_scores.json")):
+        d = json.loads(f.read_text())
+        for name, s in d["scores"].items():
+            rows.append(dict(perm=d["perm"], Model=name, n_consensus=d["n_consensus"], **s))
+    return pd.DataFrame(rows)
 
 
 def phase_evaluate(args):
@@ -305,8 +401,7 @@ def phase_evaluate(args):
             raise FileNotFoundError(f"Missing {path}; run: python run_stroke.py select --clf {clf_name}")
         selected[clf_name] = json.loads(path.read_text())["features"]
 
-    votes = Counter(f for s in selected.values() for f in s)
-    consensus = sorted(f for f, c in votes.items() if c >= 2)
+    consensus, votes = consensus_of(selected)
     print("Selected CpGs: " + ", ".join(f"{c}={len(s)}" for c, s in selected.items())
           + f" | consensus (>=2/3) = {len(consensus)}", flush=True)
     pd.DataFrame([dict(feature=f, n_classifiers=votes[f], in_consensus=votes[f] >= 2,
@@ -316,15 +411,52 @@ def phase_evaluate(args):
         out / "consensus_features.csv", index=False)
 
     lookup = {p: i for i, p in enumerate(probes)}
-    cols = np.array([lookup[f] for f in consensus])
-    table, preds = evaluate_holdout(X, y, tr, te, cols, args.n_perm, args.perm_seed)
+    cols = np.array([lookup[f] for f in consensus], dtype=int)
+    preds = predict_holdout(X, y, tr, te, cols)
+    ci, diff_ci = bootstrap_ci(y[te], preds, args.n_boot, args.boot_seed)
+
+    # Table 1: overall metrics, bootstrap 95% CIs and full-pipeline permutation p-values
+    null = load_permutation_null(args)
+    rows = []
+    for name, pred in preds.items():
+        row = dict(Model=name, **summary_metrics(y[te], pred))
+        row["Accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "acc")])
+        row["Balanced_accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "bal")])
+        if len(null):
+            nm = null[null.Model == name]
+            for metric, col in (("Test_accuracy", "Permutation_p_accuracy"),
+                                ("Balanced_accuracy", "Permutation_p_balanced_accuracy")):
+                b = int(np.sum(nm[metric].to_numpy() >= row[metric]))
+                row[col] = (b + 1) / (len(nm) + 1)
+            row["N_permutations"] = len(nm)
+            row["Null_mean_accuracy"] = nm["Test_accuracy"].mean()
+        rows.append(row)
+    table = pd.DataFrame(rows)
     table.to_csv(out / "table1.csv", index=False)
     print(table.round(4).to_string(index=False), flush=True)
+    if not len(null):
+        print("No permutation results yet: run `python run_stroke.py permutation` and re-run evaluate.", flush=True)
+
+    per_class = per_class_table(y[te], preds)
+    per_class.to_csv(out / "per_class_metrics.csv", index=False)
+
+    # Pairwise classifier comparison on the same test samples
+    comp, names = [], list(preds)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            n01, n10, p_mc = mcnemar_exact(y[te], preds[a], preds[b])
+            comp.append(dict(Model_A=a, Model_B=b,
+                             Accuracy_difference=accuracy_score(y[te], preds[a]) - accuracy_score(y[te], preds[b]),
+                             Accuracy_difference_95CI="{:.3f} to {:.3f}".format(*diff_ci[(a, b, "acc")]),
+                             Balanced_accuracy_difference_95CI="{:.3f} to {:.3f}".format(*diff_ci[(a, b, "bal")]),
+                             A_correct_B_wrong=n01, A_wrong_B_correct=n10, McNemar_exact_p=p_mc))
+    pd.DataFrame(comp).to_csv(out / "model_comparison.csv", index=False)
+    print(pd.DataFrame(comp).round(4).to_string(index=False), flush=True)
 
     plot_confusion(y[te], preds, out / "fig2_confusion.png")
     plot_metrics(table, out / "fig3_metrics.png")
     plot_heatmap(X, y, cols, consensus, out / "fig4_heatmap.png")
-    print(f"Table 1 and Figures 2-4 written to {out}", flush=True)
+    print(f"Tables and Figures 2-4 written to {out}", flush=True)
 
 
 def phase_recurrence(args):
@@ -332,7 +464,7 @@ def phase_recurrence(args):
     start, stop = args.runs
     if not args.plot_only:
         X, y, probes, _ = load_data(args.data)
-        X_fs, y_fs = fs_samples(args, X, y)
+        X_fs, y_fs = fs_samples(args, X, y, holdout_split(y, args.test_size, args.split_seed)[0])
         for run in range(start, stop):
             sets = [set(get_or_run(feature_path(args, c, run, subdir="recurrence"), X_fs, y_fs, probes, c, run, args))
                     for c in FS_MODELS]
@@ -360,7 +492,7 @@ def phase_recurrence(args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("phase", choices=["select", "evaluate", "recurrence"])
+    p.add_argument("phase", choices=["select", "evaluate", "permutation", "recurrence"])
     p.add_argument("--data", default="data/stroke_400.csv", help="input CSV (see data.py for the format)")
     p.add_argument("--out", default="results", help="output directory")
     p.add_argument("--clf", nargs="+", default=list(FS_MODELS), choices=list(FS_MODELS),
@@ -373,8 +505,12 @@ def main():
                    help="samples used for feature selection: all 400 (manuscript) or the training split only")
     p.add_argument("--test_size", type=float, default=0.3, help="hold-out test fraction (manuscript: 70:30)")
     p.add_argument("--split_seed", type=int, default=0, help="random_state of the stratified hold-out split")
-    p.add_argument("--n_perm", type=int, default=100, help="label permutations for the permutation test")
-    p.add_argument("--perm_seed", type=int, default=0)
+    p.add_argument("--n_perm", type=int, default=1000, help="[permutation] total number of label permutations")
+    p.add_argument("--perms", type=int, nargs=2, metavar=("START", "STOP"), default=None,
+                   help="[permutation] only run permutations START..STOP-1 in this process")
+    p.add_argument("--perm_seed", type=int, default=0, help="permutation i shuffles labels with seed perm_seed + i")
+    p.add_argument("--n_boot", type=int, default=2000, help="[evaluate] bootstrap resamples of the test set")
+    p.add_argument("--boot_seed", type=int, default=0)
     p.add_argument("--n_runs", type=int, default=100, help="[recurrence] total number of repeated runs")
     p.add_argument("--runs", type=int, nargs=2, metavar=("START", "STOP"), default=None,
                    help="[recurrence] only run seeds START..STOP-1 in this process")
@@ -385,9 +521,12 @@ def main():
     args = p.parse_args()
     if args.runs is None:
         args.runs = (0, args.n_runs)
+    if args.perms is None:
+        args.perms = (0, args.n_perm)
     Path(args.out).mkdir(parents=True, exist_ok=True)
 
-    {"select": phase_select, "evaluate": phase_evaluate, "recurrence": phase_recurrence}[args.phase](args)
+    {"select": phase_select, "evaluate": phase_evaluate, "permutation": phase_permutation,
+     "recurrence": phase_recurrence}[args.phase](args)
 
 
 if __name__ == "__main__":

@@ -31,8 +31,13 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
 4. **Consensus features**: CpGs selected by at least 2 of the 3 classifiers.
 5. **Evaluation**: stratified 70:30 hold-out split (test n = 120: 42 SAD / 40 LAA / 38 CE).
    LinearSVC, Logistic Regression and SVM-RBF (C=1, balanced) are trained on the training set and
-   scored on the test set (accuracy, macro F1 / precision / recall, row-normalized confusion matrix).
-   Significance by a 100-permutation label test, p = (b + 1) / (n_perm + 1).
+   scored on the test set: accuracy, balanced accuracy, macro F1 / precision / recall with
+   percentile-bootstrap 95% CIs (2,000 resamples), per-class precision / sensitivity / specificity / F1,
+   row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
+   Significance by a full-pipeline permutation test (default 1,000 permutations): the labels are
+   shuffled and the entire pipeline (ANOVA screening, TabuRL-FS with all three classifiers, consensus,
+   hold-out evaluation) is re-run on the shuffled labels, so the null distribution accounts for the
+   feature-selection step; p = (b + 1) / (n_perm + 1).
 6. **Stability**: TabuRL-FS is repeated 100 times (seeds 0-99); in every run the intersection of the
    three classifier-specific subsets is recorded and the recurrence frequency of each CpG is counted.
 
@@ -72,10 +77,14 @@ python run_stroke.py select --clf LinearSVC --n_jobs 8 --device cuda:0
 python run_stroke.py select --clf LogReg    --n_jobs 8 --device cuda:0
 python run_stroke.py select --clf SVM_RBF   --n_jobs 8 --device cuda:0
 
-# 2. Consensus features, Table 1 and Figures 2-4
+# 2. Full-pipeline permutation test (resumable; can be split across processes / GPUs)
+python run_stroke.py permutation --perms 0 500    --n_jobs 8 --device cuda:0
+python run_stroke.py permutation --perms 500 1000 --n_jobs 8 --device cuda:1
+
+# 3. Consensus features, Table 1 (with permutation p-values) and Figures 2-4
 python run_stroke.py evaluate
 
-# 3. 100 repeated runs and Figure 5 (resumable; can be split across processes)
+# 4. 100 repeated runs and Figure 5 (resumable; can be split across processes)
 python run_stroke.py recurrence --runs 0 50  --n_jobs 8 --device cuda:0
 python run_stroke.py recurrence --runs 50 100 --n_jobs 8 --device cuda:0
 python run_stroke.py recurrence --plot_only
@@ -89,7 +98,10 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | :--- | :--- |
 | `features/all_<clf>_k70_seed0.json` | CpGs selected by TabuRL-FS for each classifier |
 | `feature_votes.csv`, `consensus_features.csv` | Classifier votes per CpG and the consensus set |
-| `table1.csv` | Hold-out accuracy, F1, precision, recall and permutation p-value (Table 1) |
+| `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
+| `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
+| `model_comparison.csv` | Pairwise classifier differences with bootstrap CIs and exact McNemar tests |
+| `permutation/` | Feature sets and hold-out scores of every permutation |
 | `fig2_confusion.png` | Row-normalized confusion matrices (Figure 2) |
 | `fig3_metrics.png` | Performance comparison (Figure 3) |
 | `fig4_heatmap.png` | Hierarchical clustering of consensus CpGs (Figure 4) |
