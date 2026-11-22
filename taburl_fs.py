@@ -151,6 +151,10 @@ def taburl_fs(
     static_scores = (f_scores - f_scores.min()) / (f_scores.max() - f_scores.min() + 1e-8)
 
     device = torch.device(device if (not str(device).startswith("cuda") or torch.cuda.is_available()) else "cpu")
+    if device.type == "cuda":
+        # Make this GPU the current device; otherwise some PyTorch internals (e.g. the optimizer step)
+        # create a context on cuda:0, which fails when cuda:0 is full even though the chosen GPU has room.
+        torch.cuda.set_device(device)
     log(f"Device: {device}")
     corr_tensor = torch.tensor(np.abs(np.nan_to_num(np.corrcoef(x, rowvar=False))),
                                dtype=torch.float32, device=device)
