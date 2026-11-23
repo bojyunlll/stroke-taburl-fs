@@ -357,19 +357,21 @@ def plot_metrics(table, path):
     labels = ["Accuracy", "F1 score", "Precision", "Recall"]
     colors = ["#4C72B0", "#DD8452", "#55A868", "#C44E52"]
     x = np.arange(len(table))
-    w = 0.18
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    w = 0.2
+    fig, ax = plt.subplots(figsize=(9, 5))
     for i, (m, lab, c) in enumerate(zip(metrics, labels, colors)):
         vals = table[m].to_numpy()
-        bars = ax.bar(x + (i - 1.5) * w, vals, w, label=lab, color=c)
+        bars = ax.bar(x + (i - 1.5) * w, vals, w * 0.92, label=lab, color=c)
         for b, v in zip(bars, vals):
-            ax.text(b.get_x() + b.get_width() / 2, v + 0.005, f"{v:.3f}", ha="center", va="bottom", fontsize=8)
+            ax.text(b.get_x() + b.get_width() / 2, v + 0.008, f"{v:.3f}", ha="center", va="bottom", fontsize=7,
+                    rotation=90)
     ax.set_xticks(x)
     ax.set_xticklabels(table["Model"])
-    lo = min(0.65, table[metrics].to_numpy().min() - 0.05)
-    ax.set_ylim(lo, max(0.85, table[metrics].to_numpy().max() + 0.05))
+    vals = table[metrics].to_numpy()
+    ax.set_ylim(max(0.0, vals.min() - 0.15), min(1.0, vals.max() + 0.12))
     ax.set_ylabel("Performance score")
-    ax.set_title("Figure 3. Comparative performance")
+    ax.legend(frameon=False, ncol=4, loc="lower center", bbox_to_anchor=(0.5, 1.0))
+    ax.set_title("Figure 3. Comparative performance", pad=30)
     if "Label_permutation_p_accuracy" in table:
         n = int(table.N_label_permutations.iloc[0])
         pvals = ", ".join(f"{r.Model} {format_p(r.Label_permutation_p_accuracy, n)}" for r in table.itertuples())
@@ -379,7 +381,6 @@ def plot_metrics(table, path):
         pvals = ", ".join(f"{r.Model} p={r.Permutation_p_accuracy:.4f}" for r in table.itertuples())
         ax.text(0.5, -0.18, f"Full-pipeline permutation test ({int(table.N_permutations.iloc[0])} permutations): "
                 f"{pvals}", transform=ax.transAxes, ha="center", fontsize=9)
-    ax.legend(frameon=False, ncol=4, loc="upper center", bbox_to_anchor=(0.5, 1.12))
     fig.tight_layout()
     fig.savefig(path, dpi=300, bbox_inches="tight")
     plt.close(fig)
