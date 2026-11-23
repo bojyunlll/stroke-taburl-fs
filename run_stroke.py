@@ -6,7 +6,8 @@ Pipeline (matches the Methods section of the manuscript):
   2. TabuRL-FS is run independently with LinearSVC, Logistic Regression and SVM (RBF)
      as the wrapped classifier (k = 70 CpGs, 3,000 iterations, 5x5 CV balanced-accuracy fitness).
   3. Consensus features = CpGs selected by at least 2 of the 3 classifiers.
-  4. Stratified 70:30 hold-out split (test n = 120: 42 SAD / 40 LAA / 38 CE). The three evaluation
+  4. Stratified 80:20 hold-out split (fold 0 of a 5-fold x 2 stratified CV, random_state 2026;
+     train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE). The three evaluation
      classifiers are trained on the training set only and scored on the test set: accuracy, balanced
      accuracy, macro F1 / precision / recall with percentile-bootstrap 95% CIs, per-class metrics,
      row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
@@ -56,7 +57,7 @@ from sklearn.linear_model import LogisticRegression
 from scipy.stats import binomtest
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, confusion_matrix, f1_score,
                              precision_recall_fscore_support, precision_score, recall_score)
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC, LinearSVC
@@ -97,12 +98,17 @@ def anova_pool(X, y, n):
     return np.argsort(-np.nan_to_num(F))[:n]
 
 
-def holdout_split(y, test_size, seed):
-    return train_test_split(np.arange(len(y)), test_size=test_size, stratify=y, random_state=seed)
+def holdout_split(y, fold=0):
+    """80:20 train/test indices = fold ``fold`` (0-9) of a stratified 5-fold x 2-repeat CV (random_state 2026)."""
+    splits = RepeatedStratifiedKFold(n_splits=5, n_repeats=2, random_state=2026).split(np.zeros(len(y)), y)
+    for i, (tr, te) in enumerate(splits):
+        if i == fold:
+            return tr, te
+    raise ValueError(f"fold must be 0-9, got {fold}")
 
 
 def fs_scope(args):
-    return "all" if args.fs_data == "all" else f"train_split{args.split_seed}_test{args.test_size:g}"
+    return "all" if args.fs_data == "all" else f"train_fold{args.split_fold}"
 
 
 def feature_path(args, clf_name, seed, subdir="features"):
@@ -336,7 +342,7 @@ def consensus_of(selected, min_votes=2):
 
 def phase_select(args):
     X, y, probes, _ = load_data(args.data)
-    tr, _ = holdout_split(y, args.test_size, args.split_seed)
+    tr, _ = holdout_split(y, args.split_fold)
     X_fs, y_fs = fs_samples(args, X, y, tr)
     for clf_name in args.clf:
         names = get_or_run(feature_path(args, clf_name, args.seed), X_fs, y_fs, probes, clf_name, args.seed, args)
@@ -358,11 +364,11 @@ def phase_permutation(args):
     """
     out = Path(args.out)
     X, y, probes, _ = load_data(args.data)
-    tr, te = holdout_split(y, args.test_size, args.split_seed)
+    tr, te = holdout_split(y, args.split_fold)
     lookup = {p: i for i, p in enumerate(probes)}
     start, stop = args.perms
     for i in range(start, stop):
-        score_path = out / permutation_dir(args, i) / f"{fs_scope(args)}_k{args.k}_scores.json"
+        score_path = out / permutation_dir(args, i) / f"{fs_scope(args)}_k{args.k}_fold{args.split_fold}_scores.json"
         if score_path.exists() and not args.force:
             continue
         y_perm = np.random.default_rng(args.perm_seed + i).permutation(y)
@@ -380,7 +386,7 @@ def phase_permutation(args):
 
 def load_permutation_null(args):
     rows = []
-    for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_scores.json")):
+    for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_fold{args.split_fold}_scores.json")):
         d = json.loads(f.read_text())
         for name, s in d["scores"].items():
             rows.append(dict(perm=d["perm"], Model=name, n_consensus=d["n_consensus"], **s))
@@ -390,7 +396,7 @@ def load_permutation_null(args):
 def phase_evaluate(args):
     out = Path(args.out)
     X, y, probes, _ = load_data(args.data)
-    tr, te = holdout_split(y, args.test_size, args.split_seed)
+    tr, te = holdout_split(y, args.split_fold)
     print(f"Hold-out split: train {len(tr)} / test {len(te)}, test counts "
           f"{dict(zip(CLASS_NAMES, np.bincount(y[te]).tolist()))}", flush=True)
 
@@ -464,7 +470,7 @@ def phase_recurrence(args):
     start, stop = args.runs
     if not args.plot_only:
         X, y, probes, _ = load_data(args.data)
-        X_fs, y_fs = fs_samples(args, X, y, holdout_split(y, args.test_size, args.split_seed)[0])
+        X_fs, y_fs = fs_samples(args, X, y, holdout_split(y, args.split_fold)[0])
         for run in range(start, stop):
             sets = [set(get_or_run(feature_path(args, c, run, subdir="recurrence"), X_fs, y_fs, probes, c, run, args))
                     for c in FS_MODELS]
@@ -503,8 +509,8 @@ def main():
     p.add_argument("--seed", type=int, default=0, help="TabuRL-FS seed for the main analysis")
     p.add_argument("--fs_data", choices=["all", "train"], default="all",
                    help="samples used for feature selection: all 400 (manuscript) or the training split only")
-    p.add_argument("--test_size", type=float, default=0.3, help="hold-out test fraction (manuscript: 70:30)")
-    p.add_argument("--split_seed", type=int, default=0, help="random_state of the stratified hold-out split")
+    p.add_argument("--split_fold", type=int, default=0,
+                   help="80:20 hold-out = this fold (0-9) of a stratified 5-fold x 2-repeat CV (random_state 2026)")
     p.add_argument("--n_perm", type=int, default=1000, help="[permutation] total number of label permutations")
     p.add_argument("--perms", type=int, nargs=2, metavar=("START", "STOP"), default=None,
                    help="[permutation] only run permutations START..STOP-1 in this process")

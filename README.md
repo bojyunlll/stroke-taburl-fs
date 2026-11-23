@@ -29,7 +29,8 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
    * Transformer policy (2 layers, 8 heads, dim 256) trained with PPO (lr 1e-4, update every 20 steps,
      20 epochs, clip 0.2, GAE lambda 0.95, target KL 0.015)
 4. **Consensus features**: CpGs selected by at least 2 of the 3 classifiers.
-5. **Evaluation**: stratified 70:30 hold-out split (test n = 120: 42 SAD / 40 LAA / 38 CE).
+5. **Evaluation**: stratified 80:20 hold-out split (fold 0 of a 5-fold x 2-repeat stratified CV with
+   `random_state=2026`; train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE; `--split_fold` selects another fold).
    LinearSVC, Logistic Regression and SVM-RBF (C=1, balanced) are trained on the training set and
    scored on the test set: accuracy, balanced accuracy, macro F1 / precision / recall with
    percentile-bootstrap 95% CIs (2,000 resamples), per-class precision / sensitivity / specificity / F1,
@@ -110,6 +111,6 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 
 ## Reproducibility notes
 
-* All random seeds are fixed (`--seed`, `--split_seed`, `--perm_seed`); the CV inside the fitness
+* All random seeds are fixed (`--seed`, `--split_fold`, `--perm_seed`); the CV inside the fitness
   function uses `random_state=42`.
 * Results can vary slightly across library versions and hardware (PyTorch numerics).
