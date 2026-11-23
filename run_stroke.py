@@ -5,7 +5,8 @@ Pipeline (matches the Methods section of the manuscript):
   1. ANOVA F-test ranks all CpGs; the top 3,000 form the candidate pool.
   2. TabuRL-FS is run independently with LinearSVC, Logistic Regression and SVM (RBF)
      as the wrapped classifier (k = 70 CpGs, 3,000 iterations, 5x5 CV balanced-accuracy fitness).
-  3. Consensus features = CpGs selected by at least 2 of the 3 classifiers.
+  3. Each classifier is evaluated on the CpGs selected by TabuRL-FS wrapping that classifier
+     (--design consensus instead uses the CpGs selected by at least 2 of the 3 classifiers).
   4. Stratified 80:20 hold-out split (fold 0 of a 5-fold x 2 stratified CV, random_state 2026;
      train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE). The three evaluation
      classifiers are trained on the training set only and scored on the test set: accuracy, balanced
@@ -586,72 +587,61 @@ def phase_evaluate(args):
         out / "consensus_features.csv", index=False)
 
     lookup = {p: i for i, p in enumerate(probes)}
-    cols = np.array([lookup[f] for f in consensus], dtype=int)
-    preds = predict_holdout(X, y, tr, te, cols)
+    design = args.design
+    if design == "consensus":
+        cols = np.array([lookup[f] for f in consensus], dtype=int)
+        preds = predict_holdout(X, y, tr, te, cols)
+    else:   # each classifier on the CpGs selected by TabuRL-FS wrapping that classifier
+        preds = predict_own(X, y, tr, te, selected, lookup)
+    cols_by_model = design_columns(selected, lookup)[design]
     ci, diff_ci = bootstrap_ci(y[te], preds, args.n_boot, args.boot_seed)
+    print(f"Design: {design}", flush=True)
 
-    # Table 1: overall metrics, bootstrap 95% CIs and full-pipeline permutation p-values,
-    # for the consensus design and for each classifier on its own TabuRL-FS features
-    table = results_table(y[te], preds, ci, load_permutation_null(args, "scores"))
-    own = predict_own(X, y, tr, te, selected, lookup)
-    own_ci, _ = bootstrap_ci(y[te], own, args.n_boot, args.boot_seed)
-    own_table = results_table(y[te], own, own_ci, load_permutation_null(args, "own_scores"))
+    # Table 1: overall metrics, bootstrap 95% CIs and (when available) full-pipeline permutation p-values
+    table = results_table(y[te], preds, ci, load_permutation_null(args, "scores" if design == "consensus" else "own_scores"))
 
     # Label permutation test after feature selection (selected CpGs fixed)
     if args.n_label_perm > 0:
         t0 = time.time()
-        cols_by_design = design_columns(selected, lookup)
-        null_parts = []
-        for design, tab in (("consensus", table), ("own_features", own_table)):
-            null = label_permutation_null(X, y, tr, te, cols_by_design[design], args.n_label_perm, args.perm_seed,
-                                          args.n_jobs)
-            for k, (metric, col) in enumerate((("Test_accuracy", "Label_permutation_p_accuracy"),
-                                               ("Balanced_accuracy", "Label_permutation_p_balanced_accuracy"))):
-                tab[col] = [(int(np.sum(null[m][k] >= v)) + 1) / (args.n_label_perm + 1)
-                            for m, v in zip(tab.Model, tab[metric])]
-            tab["N_label_permutations"] = args.n_label_perm
-            tab["Label_null_mean_accuracy"] = [null[m][0].mean() for m in tab.Model]
-            for m, (a, b) in null.items():
-                null_parts.append(pd.DataFrame(dict(Design=design, Model=m, Permutation=np.arange(len(a)),
-                                                    Accuracy=a, Balanced_accuracy=b)))
-        null_df = pd.concat(null_parts, ignore_index=True)
+        null = label_permutation_null(X, y, tr, te, cols_by_model, args.n_label_perm, args.perm_seed, args.n_jobs)
+        for k, (metric, col) in enumerate((("Test_accuracy", "Label_permutation_p_accuracy"),
+                                           ("Balanced_accuracy", "Label_permutation_p_balanced_accuracy"))):
+            table[col] = [(int(np.sum(null[m][k] >= v)) + 1) / (args.n_label_perm + 1)
+                          for m, v in zip(table.Model, table[metric])]
+        table["N_label_permutations"] = args.n_label_perm
+        table["Label_null_mean_accuracy"] = [null[m][0].mean() for m in table.Model]
+        null_df = pd.concat([pd.DataFrame(dict(Design=design, Model=m, Permutation=np.arange(len(a)),
+                                               Accuracy=a, Balanced_accuracy=b)) for m, (a, b) in null.items()],
+                            ignore_index=True)
         null_df.to_csv(out / "label_permutation_null.csv.gz", index=False)
-        plot_label_permutation(null_df, {"consensus": table, "own_features": own_table}, len(te),
-                               out / "fig_label_permutation.png")
+        plot_label_permutation(null_df, {design: table}, len(te), out / "fig_label_permutation.png")
         print(f"Label permutation test: {args.n_label_perm} permutations ({time.time() - t0:.0f}s)", flush=True)
 
     table.to_csv(out / "table1.csv", index=False)
-    print("Consensus features:\n" + table.round(4).to_string(index=False), flush=True)
-    own_table.to_csv(out / "table1_own_features.csv", index=False)
-    print("Own TabuRL-FS features (classifier matched to the wrapped classifier):\n"
-          + own_table.round(4).to_string(index=False), flush=True)
-    # Repeated stratified CV (5-fold x cv_repeats) with the selected CpGs fixed, for both designs
+    print("Table 1:\n" + table.round(4).to_string(index=False), flush=True)
+
+    # Repeated stratified CV (5-fold x cv_repeats) with the selected CpGs fixed
     cv_null = load_cv_null(args)
     cv_rows = []
-    for design, cols_by_model in design_columns(selected, lookup).items():
-        for name, (acc, bal) in repeated_cv(X, y, cols_by_model, args.cv_repeats).items():
-            m, lo, hi = corrected_ci(acc)
-            mb, lob, hib = corrected_ci(bal)
-            row = dict(Design=design, Model=name, CV_accuracy=m, CV_accuracy_SD=acc.std(ddof=1),
-                       CV_accuracy_95CI=f"{lo:.3f}-{hi:.3f}", CV_balanced_accuracy=mb,
-                       CV_balanced_accuracy_95CI=f"{lob:.3f}-{hib:.3f}", N_folds=len(acc))
-            nm = cv_null[(cv_null.Design == design) & (cv_null.Model == name)] if len(cv_null) else cv_null
-            if len(nm):
-                for metric, val, col in (("CV_accuracy", m, "Permutation_p_CV_accuracy"),
-                                         ("CV_balanced_accuracy", mb, "Permutation_p_CV_balanced_accuracy")):
-                    row[col] = (int(np.sum(nm[metric].to_numpy() >= val)) + 1) / (len(nm) + 1)
-                row["N_permutations"] = len(nm)
-                row["Null_mean_CV_accuracy"] = nm["CV_accuracy"].mean()
-            cv_rows.append(row)
+    for name, (acc, bal) in repeated_cv(X, y, cols_by_model, args.cv_repeats).items():
+        m, lo, hi = corrected_ci(acc)
+        mb, lob, hib = corrected_ci(bal)
+        row = dict(Design=design, Model=name, CV_accuracy=m, CV_accuracy_SD=acc.std(ddof=1),
+                   CV_accuracy_95CI=f"{lo:.3f}-{hi:.3f}", CV_balanced_accuracy=mb,
+                   CV_balanced_accuracy_95CI=f"{lob:.3f}-{hib:.3f}", N_folds=len(acc))
+        nm = cv_null[(cv_null.Design == design) & (cv_null.Model == name)] if len(cv_null) else cv_null
+        if len(nm):
+            for metric, val, col in (("CV_accuracy", m, "Permutation_p_CV_accuracy"),
+                                     ("CV_balanced_accuracy", mb, "Permutation_p_CV_balanced_accuracy")):
+                row[col] = (int(np.sum(nm[metric].to_numpy() >= val)) + 1) / (len(nm) + 1)
+            row["N_permutations"] = len(nm)
+            row["Null_mean_CV_accuracy"] = nm["CV_accuracy"].mean()
+        cv_rows.append(row)
     cv_table = pd.DataFrame(cv_rows)
     cv_table.to_csv(out / "cv_metrics.csv", index=False)
     print(f"Repeated stratified CV (5-fold x {args.cv_repeats}):\n" + cv_table.round(4).to_string(index=False), flush=True)
-    if "N_permutations" not in table:
-        print("No permutation results yet: run `python run_stroke.py permutation` and re-run evaluate.", flush=True)
 
-    per_class = per_class_table(y[te], preds)
-    per_class.to_csv(out / "per_class_metrics.csv", index=False)
-    per_class_table(y[te], own).to_csv(out / "per_class_metrics_own_features.csv", index=False)
+    per_class_table(y[te], preds).to_csv(out / "per_class_metrics.csv", index=False)
 
     # Pairwise classifier comparison on the same test samples
     comp, names = [], list(preds)
@@ -668,8 +658,9 @@ def phase_evaluate(args):
 
     plot_confusion(y[te], preds, out / "fig2_confusion.png")
     plot_metrics(table, out / "fig3_metrics.png")
-    plot_heatmap(X, y, cols, consensus, out / "fig4_heatmap.png")
-    print(f"Tables and Figures 2-4 written to {out}", flush=True)
+    if design == "consensus":
+        plot_heatmap(X, y, cols, consensus, out / "fig4_heatmap.png")
+    print(f"Tables and Figures written to {out}", flush=True)
 
 
 def phase_recurrence(args):
@@ -724,6 +715,8 @@ def main():
     p.add_argument("--perm_seed", type=int, default=0, help="permutation i shuffles labels with seed perm_seed + i")
     p.add_argument("--n_boot", type=int, default=2000, help="[evaluate] bootstrap resamples of the test set")
     p.add_argument("--boot_seed", type=int, default=0)
+    p.add_argument("--design", choices=["own_features", "consensus"], default="own_features",
+                   help="[evaluate] features per classifier: its own TabuRL-FS subset (default) or the consensus set")
     p.add_argument("--n_label_perm", type=int, default=10000,
                    help="[evaluate] label permutations with the selected CpGs fixed (0 = skip)")
     p.add_argument("--cv_repeats", type=int, default=10,

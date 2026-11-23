@@ -14,7 +14,7 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
 | :--- | :--- |
 | `taburl_fs.py` | TabuRL-FS algorithm (tabu search + Transformer policy trained with PPO) |
 | `data.py` | Data loading and preprocessing (M-values, per-BeadChip centering) |
-| `run_stroke.py` | Full analysis: feature selection, consensus, hold-out evaluation, Table 1, Figures 2-5 |
+| `run_stroke.py` | Full analysis: feature selection, hold-out evaluation, Table 1, Figures 2-5 |
 | `run_all.sh` | Runs the complete pipeline end to end |
 
 ## Method summary
@@ -28,7 +28,8 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
    * fitness = mean balanced accuracy over stratified 5-fold x 5-repeat CV
    * Transformer policy (2 layers, 8 heads, dim 256) trained with PPO (lr 1e-4, update every 20 steps,
      20 epochs, clip 0.2, GAE lambda 0.95, target KL 0.015)
-4. **Consensus features**: CpGs selected by at least 2 of the 3 classifiers.
+4. **Classifier-specific features**: each classifier is evaluated on the 70 CpGs selected by TabuRL-FS wrapping
+   that classifier (`--design consensus` instead uses the CpGs selected by at least 2 of the 3 classifiers).
 5. **Evaluation**: stratified 80:20 hold-out split (fold 0 of a 5-fold x 2-repeat stratified CV with
    `random_state=2026`; train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE; `--split_fold` selects another fold).
    LinearSVC, Logistic Regression and SVM-RBF (C=1, balanced) are trained on the training set and
@@ -82,7 +83,7 @@ python run_stroke.py select --clf SVM_RBF   --n_jobs 8 --device cuda:0
 python run_stroke.py permutation --perms 0 500    --n_jobs 8 --device cuda:0
 python run_stroke.py permutation --perms 500 1000 --n_jobs 8 --device cuda:1
 
-# 3. Consensus features, Table 1 (with permutation p-values) and Figures 2-4
+# 3. Table 1 (with permutation p-values) and Figures 2-3
 python run_stroke.py evaluate
 
 # 4. 100 repeated runs and Figure 5 (resumable; can be split across processes)
@@ -100,7 +101,6 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `features/all_<clf>_k70_seed0.json` | CpGs selected by TabuRL-FS for each classifier |
 | `feature_votes.csv`, `consensus_features.csv` | Classifier votes per CpG and the consensus set |
 | `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
-| `table1_own_features.csv` | Same as Table 1 when each classifier uses the CpGs selected by TabuRL-FS wrapping that classifier (permutation p-values from the same permutation runs) |
 | `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for both designs: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
 | `fig_label_permutation.png`, `label_permutation_null.csv.gz` | Label permutation test after feature selection (selected CpGs fixed, 10,000 permutations): null accuracy distributions, observed accuracy and p-value for every classifier and design |
 | `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
@@ -108,7 +108,7 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `permutation/` | Feature sets and hold-out scores of every permutation |
 | `fig2_confusion.png` | Row-normalized confusion matrices (Figure 2) |
 | `fig3_metrics.png` | Performance comparison (Figure 3) |
-| `fig4_heatmap.png` | Hierarchical clustering of consensus CpGs (Figure 4) |
+| `fig4_heatmap.png` | Hierarchical clustering of consensus CpGs (Figure 4; `--design consensus` only) |
 | `recurrence/`, `recurrence_counts.csv` | Per-run selections and recurrence counts |
 | `fig5_recurrence.png` | Recurrence analysis over 100 runs (Figure 5) |
 
