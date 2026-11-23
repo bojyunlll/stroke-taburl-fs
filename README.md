@@ -101,6 +101,7 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `feature_votes.csv`, `consensus_features.csv` | Classifier votes per CpG and the consensus set |
 | `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
 | `table1_own_features.csv` | Same as Table 1 when each classifier uses the CpGs selected by TabuRL-FS wrapping that classifier (permutation p-values from the same permutation runs) |
+| `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for both designs: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
 | `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
 | `model_comparison.csv` | Pairwise classifier differences with bootstrap CIs and exact McNemar tests |
 | `permutation/` | Feature sets and hold-out scores of every permutation |

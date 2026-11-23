@@ -11,6 +11,8 @@ Pipeline (matches the Methods section of the manuscript):
      classifiers are trained on the training set only and scored on the test set: accuracy, balanced
      accuracy, macro F1 / precision / recall with percentile-bootstrap 95% CIs, per-class metrics,
      row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
+     Repeated stratified CV (5-fold x 10, CpGs fixed) gives a second estimate with Nadeau-Bengio corrected
+     95% CIs; every permutation is scored the same way, so the CV estimate has its own permutation p-value.
      Significance is assessed by a full-pipeline permutation test: labels are shuffled and the whole
      pipeline (ANOVA, TabuRL-FS x 3, consensus, evaluation) is re-run; p = (b + 1) / (n_perm + 1).
   5. Hierarchical clustering heatmap of the consensus CpGs.
@@ -55,6 +57,7 @@ from sklearn.base import clone
 from sklearn.feature_selection import f_classif
 from sklearn.linear_model import LogisticRegression
 from scipy.stats import binomtest
+from scipy.stats import t as t_dist
 from sklearn.metrics import (accuracy_score, balanced_accuracy_score, confusion_matrix, f1_score,
                              precision_recall_fscore_support, precision_score, recall_score)
 from sklearn.model_selection import RepeatedStratifiedKFold
@@ -216,6 +219,46 @@ def mcnemar_exact(y_true, pred_a, pred_b):
     n01, n10 = int(np.sum(a_ok & ~b_ok)), int(np.sum(~a_ok & b_ok))
     p = binomtest(n01, n01 + n10, 0.5).pvalue if n01 + n10 > 0 else 1.0
     return n01, n10, p
+
+
+def design_columns(selected, lookup):
+    """CpG columns per evaluation classifier for both designs: consensus (>=2/3) and own TabuRL-FS features."""
+    consensus, _ = consensus_of(selected)
+    ccols = np.array([lookup[f] for f in consensus], dtype=int)
+    return {"consensus": {name: ccols for name in EVAL_MODELS},
+            "own_features": {name: np.array([lookup[f] for f in selected[fs]], dtype=int)
+                             for fs, name in MATCHED_EVAL.items()}}
+
+
+def repeated_cv(X, y, cols_by_model, n_repeats, strata=None, seed=2026):
+    """Repeated stratified 5-fold CV of each evaluation classifier on fixed CpG columns (the first fold is the
+    80:20 hold-out split). Folds are stratified on ``strata`` (default ``y``); permutations pass the true labels
+    so that every permutation is scored on the same folds. Returns {model: (fold accuracies, fold balanced
+    accuracies)}; with no columns the prediction is the majority class of the training folds."""
+    strata = y if strata is None else strata
+    folds = list(RepeatedStratifiedKFold(n_splits=5, n_repeats=n_repeats, random_state=seed)
+                 .split(np.zeros(len(y)), strata))
+    out = {}
+    for name, cols in cols_by_model.items():
+        acc, bal = [], []
+        for tr, te in folds:
+            if len(cols) == 0:
+                pred = np.full(len(te), np.bincount(y[tr]).argmax())
+            else:
+                pipe = make_pipeline(StandardScaler(), clone(EVAL_MODELS[name])).fit(X[tr][:, cols], y[tr])
+                pred = pipe.predict(X[te][:, cols])
+            acc.append(accuracy_score(y[te], pred))
+            bal.append(balanced_accuracy_score(y[te], pred))
+        out[name] = (np.array(acc), np.array(bal))
+    return out
+
+
+def corrected_ci(scores, test_train_ratio=0.25, alpha=0.05):
+    """Mean and Nadeau-Bengio corrected t interval for repeated-CV scores; the correction accounts for the
+    overlap of training sets across folds (test/train size ratio = 1/4 for 5-fold CV)."""
+    j = len(scores)
+    half = t_dist.ppf(1 - alpha / 2, j - 1) * np.sqrt((1 / j + test_train_ratio) * np.var(scores, ddof=1))
+    return scores.mean(), scores.mean() - half, scores.mean() + half
 
 
 def per_class_table(y_true, preds):
@@ -395,8 +438,14 @@ def phase_permutation(args):
         scores = {name: summary_metrics(y_perm[te], pred) for name, pred in preds.items()}
         own = predict_own(X, y_perm, tr, te, selected, lookup)
         own_scores = {name: summary_metrics(y_perm[te], pred) for name, pred in own.items()}
+        cv_scores = {}
+        for design, cols_by_model in design_columns(selected, lookup).items():
+            res = repeated_cv(X, y_perm, cols_by_model, args.cv_repeats, strata=y)
+            cv_scores[design] = {n: dict(CV_accuracy=float(a.mean()), CV_balanced_accuracy=float(b.mean()))
+                                 for n, (a, b) in res.items()}
         score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), scores=scores,
-                                              own_scores=own_scores), indent=2))
+                                              own_scores=own_scores, cv_repeats=args.cv_repeats,
+                                              cv_scores=cv_scores), indent=2))
         print(f"[permutation {i}] consensus={len(consensus)} | "
               + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in scores.items())
               + " || own features: " + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in own_scores.items()),
@@ -410,6 +459,19 @@ def load_permutation_null(args, key="scores"):
         d = json.loads(f.read_text())
         for name, s in d.get(key, {}).items():
             rows.append(dict(perm=d["perm"], Model=name, n_consensus=d["n_consensus"], **s))
+    return pd.DataFrame(rows)
+
+
+def load_cv_null(args):
+    """Repeated-CV scores of every finished permutation (same cv_repeats as this run)."""
+    rows = []
+    for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_fold{args.split_fold}_scores.json")):
+        d = json.loads(f.read_text())
+        if d.get("cv_repeats") != args.cv_repeats:
+            continue
+        for design, models in d.get("cv_scores", {}).items():
+            for name, s in models.items():
+                rows.append(dict(perm=d["perm"], Design=design, Model=name, **s))
     return pd.DataFrame(rows)
 
 
@@ -472,6 +534,27 @@ def phase_evaluate(args):
     own_table.to_csv(out / "table1_own_features.csv", index=False)
     print("Own TabuRL-FS features (classifier matched to the wrapped classifier):\n"
           + own_table.round(4).to_string(index=False), flush=True)
+    # Repeated stratified CV (5-fold x cv_repeats) with the selected CpGs fixed, for both designs
+    cv_null = load_cv_null(args)
+    cv_rows = []
+    for design, cols_by_model in design_columns(selected, lookup).items():
+        for name, (acc, bal) in repeated_cv(X, y, cols_by_model, args.cv_repeats).items():
+            m, lo, hi = corrected_ci(acc)
+            mb, lob, hib = corrected_ci(bal)
+            row = dict(Design=design, Model=name, CV_accuracy=m, CV_accuracy_SD=acc.std(ddof=1),
+                       CV_accuracy_95CI=f"{lo:.3f}-{hi:.3f}", CV_balanced_accuracy=mb,
+                       CV_balanced_accuracy_95CI=f"{lob:.3f}-{hib:.3f}", N_folds=len(acc))
+            nm = cv_null[(cv_null.Design == design) & (cv_null.Model == name)] if len(cv_null) else cv_null
+            if len(nm):
+                for metric, val, col in (("CV_accuracy", m, "Permutation_p_CV_accuracy"),
+                                         ("CV_balanced_accuracy", mb, "Permutation_p_CV_balanced_accuracy")):
+                    row[col] = (int(np.sum(nm[metric].to_numpy() >= val)) + 1) / (len(nm) + 1)
+                row["N_permutations"] = len(nm)
+                row["Null_mean_CV_accuracy"] = nm["CV_accuracy"].mean()
+            cv_rows.append(row)
+    cv_table = pd.DataFrame(cv_rows)
+    cv_table.to_csv(out / "cv_metrics.csv", index=False)
+    print(f"Repeated stratified CV (5-fold x {args.cv_repeats}):\n" + cv_table.round(4).to_string(index=False), flush=True)
     if "N_permutations" not in table:
         print("No permutation results yet: run `python run_stroke.py permutation` and re-run evaluate.", flush=True)
 
@@ -549,6 +632,8 @@ def main():
     p.add_argument("--perm_seed", type=int, default=0, help="permutation i shuffles labels with seed perm_seed + i")
     p.add_argument("--n_boot", type=int, default=2000, help="[evaluate] bootstrap resamples of the test set")
     p.add_argument("--boot_seed", type=int, default=0)
+    p.add_argument("--cv_repeats", type=int, default=10,
+                   help="[evaluate/permutation] repeats of the stratified 5-fold CV (5 x 10 = 50 folds)")
     p.add_argument("--n_runs", type=int, default=100, help="[recurrence] total number of repeated runs")
     p.add_argument("--runs", type=int, nargs=2, metavar=("START", "STOP"), default=None,
                    help="[recurrence] only run seeds START..STOP-1 in this process")
