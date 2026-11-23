@@ -198,16 +198,21 @@ def predict_own(X, y, tr, te, selected, lookup):
 
 
 def bootstrap_ci(y_true, preds, n_boot, seed, alpha=0.05):
-    """Percentile bootstrap CIs (test samples resampled with replacement) for accuracy and balanced accuracy,
-    and for the pairwise differences between classifiers (same resamples for all classifiers)."""
+    """Percentile bootstrap CIs (test samples resampled with replacement) for accuracy, balanced accuracy and
+    macro F1 / precision / recall, and for the pairwise differences between classifiers in accuracy and balanced
+    accuracy (same resamples for all classifiers)."""
     rng = np.random.default_rng(seed)
     names = list(preds)
-    stats = {(n, m): [] for n in names for m in ("acc", "bal")}
+    stats = {(n, m): [] for n in names for m in ("acc", "bal", "f1", "prec", "rec")}
     for _ in range(n_boot):
         idx = rng.integers(0, len(y_true), len(y_true))
         for n in names:
-            stats[(n, "acc")].append(accuracy_score(y_true[idx], preds[n][idx]))
-            stats[(n, "bal")].append(balanced_accuracy_score(y_true[idx], preds[n][idx]))
+            yt, yp = y_true[idx], preds[n][idx]
+            stats[(n, "acc")].append(accuracy_score(yt, yp))
+            stats[(n, "bal")].append(balanced_accuracy_score(yt, yp))
+            stats[(n, "f1")].append(f1_score(yt, yp, average="macro"))
+            stats[(n, "prec")].append(precision_score(yt, yp, average="macro", zero_division=0))
+            stats[(n, "rec")].append(recall_score(yt, yp, average="macro"))
     q = [100 * alpha / 2, 100 * (1 - alpha / 2)]
     ci = {k: np.percentile(v, q) for k, v in stats.items()}
     diff_ci = {}
@@ -321,6 +326,53 @@ def plot_label_permutation(null_df, tables, n_test, path):
     fig.suptitle(f"Label permutation test with the selected CpGs fixed ({len(null):,} permutations, test n = {n_test})")
     fig.tight_layout()
     fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
+def report_model_table(name, table, ci, cv_table, n_test, n_perm):
+    """One classifier: hold-out metrics with bootstrap CIs, repeated-CV estimates with corrected CIs and the
+    label permutation test, as rows (Section, Metric, Estimate, 95% CI)."""
+    row = table.set_index("Model").loc[name]
+    cvr = cv_table.set_index("Model").loc[name]
+    rows = [("Hold-out test set (n = %d)" % n_test, label, row[col], "{:.3f}-{:.3f}".format(*ci[(name, key)]))
+            for label, col, key in (("Accuracy", "Test_accuracy", "acc"), ("Balanced accuracy", "Balanced_accuracy", "bal"),
+                                    ("Macro F1 score", "F1_score", "f1"), ("Macro precision", "Precision", "prec"),
+                                    ("Macro recall", "Recall", "rec"))]
+    rows += [("Repeated stratified CV (5-fold x %d)" % (cvr.N_folds // 5), "Accuracy", cvr.CV_accuracy, cvr.CV_accuracy_95CI),
+             ("Repeated stratified CV (5-fold x %d)" % (cvr.N_folds // 5), "Balanced accuracy", cvr.CV_balanced_accuracy,
+              cvr.CV_balanced_accuracy_95CI)]
+    if "Label_permutation_p_accuracy" in row:
+        sec = f"Label permutation test ({n_perm:,} permutations)"
+        rows += [(sec, "Mean accuracy with permuted labels", row.Label_null_mean_accuracy, ""),
+                 (sec, "Permutation p value (accuracy)", row.Label_permutation_p_accuracy, format_p(row.Label_permutation_p_accuracy, n_perm)),
+                 (sec, "Permutation p value (balanced accuracy)", row.Label_permutation_p_balanced_accuracy,
+                  format_p(row.Label_permutation_p_balanced_accuracy, n_perm))]
+    return pd.DataFrame(rows, columns=["Section", "Metric", "Estimate", "95% CI or note"])
+
+
+def plot_permutation_single(null_acc, observed, p, name, n_test, path):
+    """Null distribution of test accuracy under permuted labels for one classifier, with the observed accuracy."""
+    n_perm = len(null_acc)
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    edges = (np.arange(n_test + 2) - 0.5) / n_test   # one bin per attainable accuracy k / n_test
+    ax.hist(null_acc, bins=edges, color="#9E9E9E", edgecolor="white", linewidth=0.3,
+            label=f"Permuted labels ({n_perm:,} permutations)")
+    ax.axvline(observed, color="#C44E52", lw=2.5, label=f"Observed accuracy = {observed:.3f}")
+    ax.axvline(null_acc.mean(), ymax=0.72, color="#424242", lw=1, ls="--",
+               label=f"Mean with permuted labels = {null_acc.mean():.3f}")   # stops below the legend
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.25)
+    ax.set_xlabel(f"Test accuracy (held-out test set, n = {n_test})")
+    ax.set_ylabel("Number of permutations")
+    ax.set_title(f"Permutation test: {name}")
+    ax.legend(frameon=False, loc="upper left", fontsize=9)
+    ax.text(observed, ax.get_ylim()[1] * 0.55, f"  {format_p(p, n_perm)}", color="#C44E52", fontsize=11,
+            ha="left" if observed < 0.85 else "right", va="center")
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(Path(path).with_suffix(".pdf"), bbox_inches="tight")
     plt.close(fig)
 
 
@@ -656,6 +708,17 @@ def phase_evaluate(args):
     pd.DataFrame(comp).to_csv(out / "model_comparison.csv", index=False)
     print(pd.DataFrame(comp).round(4).to_string(index=False), flush=True)
 
+    # Report for one classifier (default: logistic regression, the classifier wrapped in the main TabuRL-FS run)
+    if args.report_model in preds:
+        tag = args.report_model.lower().replace(" ", "_").replace("(", "").replace(")", "")
+        rep_table = report_model_table(args.report_model, table, ci, cv_table, len(te), args.n_label_perm)
+        rep_table.to_csv(out / f"table_{tag}.csv", index=False)
+        print(f"{args.report_model}:\n" + rep_table.round(4).to_string(index=False), flush=True)
+        if args.n_label_perm > 0:
+            r = table.set_index("Model").loc[args.report_model]
+            plot_permutation_single(null[args.report_model][0], r.Test_accuracy, r.Label_permutation_p_accuracy,
+                                    args.report_model, len(te), out / f"fig_permutation_{tag}.png")
+
     plot_confusion(y[te], preds, out / "fig2_confusion.png")
     plot_metrics(table, out / "fig3_metrics.png")
     if design == "consensus":
@@ -717,6 +780,8 @@ def main():
     p.add_argument("--boot_seed", type=int, default=0)
     p.add_argument("--design", choices=["own_features", "consensus"], default="own_features",
                    help="[evaluate] features per classifier: its own TabuRL-FS subset (default) or the consensus set")
+    p.add_argument("--report_model", default="Logistic Regression",
+                   help="[evaluate] classifier for the single-model CI table and permutation figure")
     p.add_argument("--n_label_perm", type=int, default=10000,
                    help="[evaluate] label permutations with the selected CpGs fixed (0 = skip)")
     p.add_argument("--cv_repeats", type=int, default=10,

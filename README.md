@@ -103,6 +103,7 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
 | `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for both designs: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
 | `fig_label_permutation.png`, `label_permutation_null.csv.gz` | Label permutation test after feature selection (selected CpGs fixed, 10,000 permutations): null accuracy distributions, observed accuracy and p-value for every classifier and design |
+| `table_logistic_regression.csv`, `fig_permutation_logistic_regression.png/.pdf` | Report for `--report_model` (default logistic regression): hold-out metrics with bootstrap 95% CIs, repeated-CV estimates and permutation p-values; permutation null distribution with the observed accuracy |
 | `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
 | `model_comparison.csv` | Pairwise classifier differences with bootstrap CIs and exact McNemar tests |
 | `permutation/` | Feature sets and hold-out scores of every permutation |
