@@ -104,8 +104,8 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `features/all_<clf>_k70_seed0.json` | CpGs selected by TabuRL-FS for each classifier |
 | `feature_votes.csv`, `consensus_features.csv` | Classifier votes per CpG and the consensus set |
 | `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
-| `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for both designs: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
-| `fig_label_permutation.png`, `label_permutation_null.csv.gz` | Label permutation test after feature selection (selected CpGs fixed, 10,000 permutations): null accuracy distributions, observed accuracy and p-value for every classifier and design |
+| `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for the evaluated design: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
+| `fig_label_permutation.png`, `label_permutation_null.csv.gz` | Label permutation test after feature selection (selected CpGs fixed, 10,000 permutations): null accuracy distributions, accuracy with true labels and p-value for every classifier |
 | `table_<model>.csv`, `fig_permutation_<model>.png/.pdf` | Report for each classifier in `--report_model` (default: all three): hold-out metrics with bootstrap 95% CIs, repeated-CV estimates and permutation p-values; permutation null distribution with the accuracy with true labels |
 | `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
 | `model_comparison.csv` | Pairwise classifier differences with bootstrap CIs and exact McNemar tests |
