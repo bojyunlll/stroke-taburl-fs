@@ -175,6 +175,20 @@ def predict_holdout(X, y, tr, te, cols):
     return preds
 
 
+# Evaluation classifier matched to the classifier wrapped inside TabuRL-FS ("own features" design)
+MATCHED_EVAL = {"LinearSVC": "LinearSVC", "LogReg": "Logistic Regression", "SVM_RBF": "SVM (RBF)"}
+
+
+def predict_own(X, y, tr, te, selected, lookup):
+    """Each evaluation classifier on the CpGs selected by TabuRL-FS wrapping the same classifier."""
+    preds = {}
+    for fs_clf, name in MATCHED_EVAL.items():
+        cols = np.array([lookup[f] for f in selected[fs_clf]], dtype=int)
+        pipe = make_pipeline(StandardScaler(), clone(EVAL_MODELS[name])).fit(X[tr][:, cols], y[tr])
+        preds[name] = pipe.predict(X[te][:, cols])
+    return preds
+
+
 def bootstrap_ci(y_true, preds, n_boot, seed, alpha=0.05):
     """Percentile bootstrap CIs (test samples resampled with replacement) for accuracy and balanced accuracy,
     and for the pairwise differences between classifiers (same resamples for all classifiers)."""
@@ -379,17 +393,42 @@ def phase_permutation(args):
         cols = np.array([lookup[f] for f in consensus], dtype=int)
         preds = predict_holdout(X, y_perm, tr, te, cols)
         scores = {name: summary_metrics(y_perm[te], pred) for name, pred in preds.items()}
-        score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), scores=scores), indent=2))
+        own = predict_own(X, y_perm, tr, te, selected, lookup)
+        own_scores = {name: summary_metrics(y_perm[te], pred) for name, pred in own.items()}
+        score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), scores=scores,
+                                              own_scores=own_scores), indent=2))
         print(f"[permutation {i}] consensus={len(consensus)} | "
-              + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in scores.items()), flush=True)
+              + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in scores.items())
+              + " || own features: " + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in own_scores.items()),
+              flush=True)
 
 
-def load_permutation_null(args):
+def load_permutation_null(args, key="scores"):
+    """key = "scores" (consensus design) or "own_scores" (each classifier on its own TabuRL-FS features)."""
     rows = []
     for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_fold{args.split_fold}_scores.json")):
         d = json.loads(f.read_text())
-        for name, s in d["scores"].items():
+        for name, s in d.get(key, {}).items():
             rows.append(dict(perm=d["perm"], Model=name, n_consensus=d["n_consensus"], **s))
+    return pd.DataFrame(rows)
+
+
+def results_table(y_te, preds, ci, null):
+    """Hold-out metrics, bootstrap 95% CIs and (when available) full-pipeline permutation p-values."""
+    rows = []
+    for name, pred in preds.items():
+        row = dict(Model=name, **summary_metrics(y_te, pred))
+        row["Accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "acc")])
+        row["Balanced_accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "bal")])
+        if len(null):
+            nm = null[null.Model == name]
+            for metric, col in (("Test_accuracy", "Permutation_p_accuracy"),
+                                ("Balanced_accuracy", "Permutation_p_balanced_accuracy")):
+                b = int(np.sum(nm[metric].to_numpy() >= row[metric]))
+                row[col] = (b + 1) / (len(nm) + 1)
+            row["N_permutations"] = len(nm)
+            row["Null_mean_accuracy"] = nm["Test_accuracy"].mean()
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -422,25 +461,18 @@ def phase_evaluate(args):
     ci, diff_ci = bootstrap_ci(y[te], preds, args.n_boot, args.boot_seed)
 
     # Table 1: overall metrics, bootstrap 95% CIs and full-pipeline permutation p-values
-    null = load_permutation_null(args)
-    rows = []
-    for name, pred in preds.items():
-        row = dict(Model=name, **summary_metrics(y[te], pred))
-        row["Accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "acc")])
-        row["Balanced_accuracy_95CI"] = "{:.3f}-{:.3f}".format(*ci[(name, "bal")])
-        if len(null):
-            nm = null[null.Model == name]
-            for metric, col in (("Test_accuracy", "Permutation_p_accuracy"),
-                                ("Balanced_accuracy", "Permutation_p_balanced_accuracy")):
-                b = int(np.sum(nm[metric].to_numpy() >= row[metric]))
-                row[col] = (b + 1) / (len(nm) + 1)
-            row["N_permutations"] = len(nm)
-            row["Null_mean_accuracy"] = nm["Test_accuracy"].mean()
-        rows.append(row)
-    table = pd.DataFrame(rows)
+    table = results_table(y[te], preds, ci, load_permutation_null(args, "scores"))
     table.to_csv(out / "table1.csv", index=False)
-    print(table.round(4).to_string(index=False), flush=True)
-    if not len(null):
+    print("Consensus features:\n" + table.round(4).to_string(index=False), flush=True)
+
+    # Same table for the design in which each classifier uses its own TabuRL-FS features
+    own = predict_own(X, y, tr, te, selected, lookup)
+    own_ci, _ = bootstrap_ci(y[te], own, args.n_boot, args.boot_seed)
+    own_table = results_table(y[te], own, own_ci, load_permutation_null(args, "own_scores"))
+    own_table.to_csv(out / "table1_own_features.csv", index=False)
+    print("Own TabuRL-FS features (classifier matched to the wrapped classifier):\n"
+          + own_table.round(4).to_string(index=False), flush=True)
+    if "N_permutations" not in table:
         print("No permutation results yet: run `python run_stroke.py permutation` and re-run evaluate.", flush=True)
 
     per_class = per_class_table(y[te], preds)
