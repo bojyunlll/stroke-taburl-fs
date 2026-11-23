@@ -81,10 +81,10 @@ FS_MODELS = {
     "SVM_RBF": lambda seed: SVC(kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=seed),
 }
 
-# Classifiers used for the final hold-out evaluation (Table 1, Figures 2-3).
-# Logistic regression keeps the setting used inside TabuRL-FS (C = 0.01), the model the CpGs were selected for.
+# Classifiers used for the final hold-out evaluation (Table 1, Figures 2-3), with the same regularization as
+# inside TabuRL-FS (LinearSVC and logistic regression C = 0.01, SVM-RBF C = 1).
 EVAL_MODELS = {
-    "LinearSVC": LinearSVC(C=1.0, dual=False, class_weight="balanced", max_iter=5000, random_state=42),
+    "LinearSVC": LinearSVC(C=0.01, dual=False, class_weight="balanced", max_iter=5000, random_state=42),
     "Logistic Regression": LogisticRegression(C=0.01, class_weight="balanced", max_iter=2000, random_state=42),
     "SVM (RBF)": SVC(kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=42),
 }
@@ -171,15 +171,15 @@ def summary_metrics(y_true, pred):
                 Recall=recall_score(y_true, pred, average="macro"))
 
 
-def predict_holdout(X, y, tr, te, cols):
-    """Fit every evaluation classifier on the training split and predict the test split.
-    With no features (empty consensus) the prediction is the majority class of the training split."""
+def predict_columns(X, y, tr, te, cols_by_model):
+    """Fit each evaluation classifier on the training split using its CpG columns and predict the test split.
+    With no columns (empty consensus) the prediction is the majority class of the training split."""
     preds = {}
-    for name, clf in EVAL_MODELS.items():
+    for name, cols in cols_by_model.items():
         if len(cols) == 0:
             preds[name] = np.full(len(te), np.bincount(y[tr]).argmax())
             continue
-        pipe = make_pipeline(StandardScaler(), clone(clf)).fit(X[tr][:, cols], y[tr])
+        pipe = make_pipeline(StandardScaler(), clone(EVAL_MODELS[name])).fit(X[tr][:, cols], y[tr])
         preds[name] = pipe.predict(X[te][:, cols])
     return preds
 
@@ -187,15 +187,11 @@ def predict_holdout(X, y, tr, te, cols):
 # Evaluation classifier matched to the classifier wrapped inside TabuRL-FS ("own features" design)
 MATCHED_EVAL = {"LinearSVC": "LinearSVC", "LogReg": "Logistic Regression", "SVM_RBF": "SVM (RBF)"}
 
-
-def predict_own(X, y, tr, te, selected, lookup):
-    """Each evaluation classifier on the CpGs selected by TabuRL-FS wrapping the same classifier."""
-    preds = {}
-    for fs_clf, name in MATCHED_EVAL.items():
-        cols = np.array([lookup[f] for f in selected[fs_clf]], dtype=int)
-        pipe = make_pipeline(StandardScaler(), clone(EVAL_MODELS[name])).fit(X[tr][:, cols], y[tr])
-        preds[name] = pipe.predict(X[te][:, cols])
-    return preds
+# Feature designs: <clf>_features = every classifier on the CpGs selected by TabuRL-FS wrapping <clf>;
+# own_features = each classifier on its own TabuRL-FS CpGs; consensus = CpGs selected with >= 2 of 3 classifiers
+DESIGNS = [f"{c}_features" for c in FS_MODELS] + ["own_features", "consensus"]
+DESIGN_TITLES = {**{f"{c}_features": f"TabuRL-FS ({c}) CpGs" for c in FS_MODELS},
+                 "own_features": "Classifier-specific CpGs", "consensus": "Consensus CpGs"}
 
 
 def bootstrap_ci(y_true, preds, n_boot, seed, alpha=0.05):
@@ -233,12 +229,14 @@ def mcnemar_exact(y_true, pred_a, pred_b):
 
 
 def design_columns(selected, lookup):
-    """CpG columns per evaluation classifier for both designs: consensus (>=2/3) and own TabuRL-FS features."""
+    """CpG columns per evaluation classifier for every design in DESIGNS."""
+    cols = {fs: np.array([lookup[f] for f in sel], dtype=int) for fs, sel in selected.items()}
     consensus, _ = consensus_of(selected)
     ccols = np.array([lookup[f] for f in consensus], dtype=int)
-    return {"consensus": {name: ccols for name in EVAL_MODELS},
-            "own_features": {name: np.array([lookup[f] for f in selected[fs]], dtype=int)
-                             for fs, name in MATCHED_EVAL.items()}}
+    designs = {f"{fs}_features": {name: c for name in EVAL_MODELS} for fs, c in cols.items()}
+    designs["own_features"] = {name: cols[fs] for fs, name in MATCHED_EVAL.items()}
+    designs["consensus"] = {name: ccols for name in EVAL_MODELS}
+    return designs
 
 
 def repeated_cv(X, y, cols_by_model, n_repeats, strata=None, seed=2026):
@@ -303,7 +301,7 @@ def format_p(p, n_perm):
 
 
 def plot_label_permutation(null_df, tables, n_test, path):
-    titles = {"consensus": "Consensus CpGs", "own_features": "Classifier-specific CpGs"}
+    titles = DESIGN_TITLES
     designs = [d for d in titles if d in set(null_df.Design)]
     models = list(EVAL_MODELS)
     fig, axes = plt.subplots(len(designs), len(models), figsize=(4.3 * len(models), 3.5 * len(designs)), squeeze=False)
@@ -565,31 +563,30 @@ def phase_permutation(args):
         selected = {c: get_or_run(feature_path(args, c, args.seed, subdir=permutation_dir(args, i)),
                                   X_fs, y_fs, probes, c, args.seed, args) for c in FS_MODELS}
         consensus, _ = consensus_of(selected)
-        cols = np.array([lookup[f] for f in consensus], dtype=int)
-        preds = predict_holdout(X, y_perm, tr, te, cols)
-        scores = {name: summary_metrics(y_perm[te], pred) for name, pred in preds.items()}
-        own = predict_own(X, y_perm, tr, te, selected, lookup)
-        own_scores = {name: summary_metrics(y_perm[te], pred) for name, pred in own.items()}
-        cv_scores = {}
+        design_scores, cv_scores = {}, {}
         for design, cols_by_model in design_columns(selected, lookup).items():
+            preds = predict_columns(X, y_perm, tr, te, cols_by_model)
+            design_scores[design] = {n: summary_metrics(y_perm[te], pred) for n, pred in preds.items()}
             res = repeated_cv(X, y_perm, cols_by_model, args.cv_repeats, strata=y)
             cv_scores[design] = {n: dict(CV_accuracy=float(a.mean()), CV_balanced_accuracy=float(b.mean()))
                                  for n, (a, b) in res.items()}
-        score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), scores=scores,
-                                              own_scores=own_scores, cv_repeats=args.cv_repeats,
-                                              cv_scores=cv_scores), indent=2))
-        print(f"[permutation {i}] consensus={len(consensus)} | "
-              + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in scores.items())
-              + " || own features: " + " | ".join(f"{n}: acc={s['Test_accuracy']:.3f}" for n, s in own_scores.items()),
-              flush=True)
+        score_path.write_text(json.dumps(dict(perm=i, n_consensus=len(consensus), design_scores=design_scores,
+                                              cv_repeats=args.cv_repeats, cv_scores=cv_scores), indent=2))
+        print(f"[permutation {i}] consensus={len(consensus)} || " + " || ".join(
+            f"{d}: " + " | ".join(f"{n} acc={sc['Test_accuracy']:.3f}" for n, sc in ds.items())
+            for d, ds in design_scores.items()), flush=True)
 
 
-def load_permutation_null(args, key="scores"):
-    """key = "scores" (consensus design) or "own_scores" (each classifier on its own TabuRL-FS features)."""
+LEGACY_SCORE_KEYS = {"consensus": "scores", "own_features": "own_scores"}
+
+
+def load_permutation_null(args, design):
+    """Hold-out scores of every finished full-pipeline permutation for one design."""
     rows = []
     for f in sorted(Path(args.out).glob(f"permutation/perm*/{fs_scope(args)}_k{args.k}_fold{args.split_fold}_scores.json")):
         d = json.loads(f.read_text())
-        for name, s in d.get(key, {}).items():
+        scores = d["design_scores"].get(design, {}) if "design_scores" in d else d.get(LEGACY_SCORE_KEYS.get(design), {})
+        for name, s in scores.items():
             rows.append(dict(perm=d["perm"], Model=name, n_consensus=d["n_consensus"], **s))
     return pd.DataFrame(rows)
 
@@ -651,17 +648,13 @@ def phase_evaluate(args):
 
     lookup = {p: i for i, p in enumerate(probes)}
     design = args.design
-    if design == "consensus":
-        cols = np.array([lookup[f] for f in consensus], dtype=int)
-        preds = predict_holdout(X, y, tr, te, cols)
-    else:   # each classifier on the CpGs selected by TabuRL-FS wrapping that classifier
-        preds = predict_own(X, y, tr, te, selected, lookup)
     cols_by_model = design_columns(selected, lookup)[design]
+    preds = predict_columns(X, y, tr, te, cols_by_model)
     ci, diff_ci = bootstrap_ci(y[te], preds, args.n_boot, args.boot_seed)
     print(f"Design: {design}", flush=True)
 
     # Table 1: overall metrics, bootstrap 95% CIs and (when available) full-pipeline permutation p-values
-    table = results_table(y[te], preds, ci, load_permutation_null(args, "scores" if design == "consensus" else "own_scores"))
+    table = results_table(y[te], preds, ci, load_permutation_null(args, design))
 
     # Label permutation test after feature selection (selected CpGs fixed)
     if args.n_label_perm > 0:
@@ -719,21 +712,21 @@ def phase_evaluate(args):
     pd.DataFrame(comp).to_csv(out / "model_comparison.csv", index=False)
     print(pd.DataFrame(comp).round(4).to_string(index=False), flush=True)
 
-    # Report for one classifier (default: logistic regression, the classifier wrapped in the main TabuRL-FS run)
-    if args.report_model in preds:
-        tag = args.report_model.lower().replace(" ", "_").replace("(", "").replace(")", "")
-        rep_table = report_model_table(args.report_model, table, ci, cv_table, len(te), args.n_label_perm)
+    # Single-classifier reports: CI table and permutation null distribution figure
+    for name in args.report_model:
+        tag = name.lower().replace(" ", "_").replace("(", "").replace(")", "")
+        rep_table = report_model_table(name, table, ci, cv_table, len(te), args.n_label_perm)
         rep_table.to_csv(out / f"table_{tag}.csv", index=False)
-        print(f"{args.report_model}:\n" + rep_table.round(4).to_string(index=False), flush=True)
+        print(f"{name}:\n" + rep_table.round(4).to_string(index=False), flush=True)
         if args.n_label_perm > 0:
-            r = table.set_index("Model").loc[args.report_model]
-            plot_permutation_single(null[args.report_model][0], r.Test_accuracy, r.Label_permutation_p_accuracy,
-                                    args.report_model, len(te), out / f"fig_permutation_{tag}.png")
+            r = table.set_index("Model").loc[name]
+            plot_permutation_single(null[name][0], r.Test_accuracy, r.Label_permutation_p_accuracy,
+                                    name, len(te), out / f"fig_permutation_{tag}.png")
 
     plot_confusion(y[te], preds, out / "fig2_confusion.png")
     plot_metrics(table, out / "fig3_metrics.png")
     if design == "consensus":
-        plot_heatmap(X, y, cols, consensus, out / "fig4_heatmap.png")
+        plot_heatmap(X, y, cols_by_model["Logistic Regression"], consensus, out / "fig4_heatmap.png")
     print(f"Tables and Figures written to {out}", flush=True)
 
 
@@ -789,10 +782,12 @@ def main():
     p.add_argument("--perm_seed", type=int, default=0, help="permutation i shuffles labels with seed perm_seed + i")
     p.add_argument("--n_boot", type=int, default=2000, help="[evaluate] bootstrap resamples of the test set")
     p.add_argument("--boot_seed", type=int, default=0)
-    p.add_argument("--design", choices=["own_features", "consensus"], default="own_features",
-                   help="[evaluate] features per classifier: its own TabuRL-FS subset (default) or the consensus set")
-    p.add_argument("--report_model", default="Logistic Regression",
-                   help="[evaluate] classifier for the single-model CI table and permutation figure")
+    p.add_argument("--design", choices=DESIGNS, default="LogReg_features",
+                   help="[evaluate] CpGs per classifier: LogReg_features (default) = all classifiers on the CpGs "
+                        "selected by TabuRL-FS with logistic regression; own_features = each classifier on its own "
+                        "TabuRL-FS CpGs; consensus = CpGs selected with >= 2 of 3 classifiers")
+    p.add_argument("--report_model", nargs="+", default=list(EVAL_MODELS), choices=list(EVAL_MODELS),
+                   help="[evaluate] classifiers that get a single-model CI table and permutation figure")
     p.add_argument("--n_label_perm", type=int, default=10000,
                    help="[evaluate] label permutations with the selected CpGs fixed (0 = skip)")
     p.add_argument("--cv_repeats", type=int, default=10,

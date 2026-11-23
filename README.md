@@ -28,12 +28,14 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
    * fitness = mean balanced accuracy over stratified 5-fold x 5-repeat CV
    * Transformer policy (2 layers, 8 heads, dim 256) trained with PPO (lr 1e-4, update every 20 steps,
      20 epochs, clip 0.2, GAE lambda 0.95, target KL 0.015)
-4. **Classifier-specific features**: each classifier is evaluated on the 70 CpGs selected by TabuRL-FS wrapping
-   that classifier (`--design consensus` instead uses the CpGs selected by at least 2 of the 3 classifiers).
+4. **Evaluated features**: by default all three classifiers are evaluated on the 70 CpGs selected by TabuRL-FS
+   with logistic regression (`--design LogReg_features`). Alternatives: `--design own_features` (each classifier
+   on the CpGs selected by TabuRL-FS wrapping that classifier), `LinearSVC_features` / `SVM_RBF_features`, and
+   `consensus` (CpGs selected by at least 2 of the 3 classifiers).
 5. **Evaluation**: stratified 80:20 hold-out split (fold 0 of a 5-fold x 2-repeat stratified CV with
    `random_state=2026`; train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE; `--split_fold` selects another fold).
-   LinearSVC (C=1), Logistic Regression (C=0.01, the same setting as inside TabuRL-FS) and SVM-RBF (C=1),
-   all `class_weight="balanced"`, are trained on the training set and
+   LinearSVC (C=0.01), Logistic Regression (C=0.01) and SVM-RBF (C=1), i.e. the same settings as inside
+   TabuRL-FS, all `class_weight="balanced"`, are trained on the training set and
    scored on the test set: accuracy, balanced accuracy, macro F1 / precision / recall with
    percentile-bootstrap 95% CIs (2,000 resamples), per-class precision / sensitivity / specificity / F1,
    row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
@@ -104,7 +106,7 @@ Or run everything with `bash run_all.sh`. Run `python run_stroke.py -h` for all 
 | `table1.csv` | Hold-out accuracy, balanced accuracy, F1, precision, recall, bootstrap 95% CIs and permutation p-values (Table 1) |
 | `cv_metrics.csv` | Repeated stratified CV (5-fold x 10, selected CpGs fixed) for both designs: mean, SD, Nadeau-Bengio corrected 95% CI and permutation p-values |
 | `fig_label_permutation.png`, `label_permutation_null.csv.gz` | Label permutation test after feature selection (selected CpGs fixed, 10,000 permutations): null accuracy distributions, observed accuracy and p-value for every classifier and design |
-| `table_logistic_regression.csv`, `fig_permutation_logistic_regression.png/.pdf` | Report for `--report_model` (default logistic regression): hold-out metrics with bootstrap 95% CIs, repeated-CV estimates and permutation p-values; permutation null distribution with the observed accuracy |
+| `table_<model>.csv`, `fig_permutation_<model>.png/.pdf` | Report for each classifier in `--report_model` (default: all three): hold-out metrics with bootstrap 95% CIs, repeated-CV estimates and permutation p-values; permutation null distribution with the accuracy with true labels |
 | `per_class_metrics.csv` | Per-class precision, sensitivity, specificity and F1 |
 | `model_comparison.csv` | Pairwise classifier differences with bootstrap CIs and exact McNemar tests |
 | `permutation/` | Feature sets and hold-out scores of every permutation |
