@@ -313,11 +313,11 @@ def plot_label_permutation(null_df, tables, n_test, path):
             null = null_df[(null_df.Design == design) & (null_df.Model == m)].Accuracy.to_numpy()
             obs, p = tab.loc[m, "Test_accuracy"], tab.loc[m, "Label_permutation_p_accuracy"]
             ax.hist(null, bins=edges, color="#8C8C8C", edgecolor="none", label="Permuted labels")
-            ax.axvline(obs, color="#C44E52", lw=2, label="Observed")
+            ax.axvline(obs, color="#C44E52", lw=2, label="True labels")
             ax.set_xlim(0, 1)
             ax.set_title(f"{titles[design]}: {m}", fontsize=10)
             ax.set_ylim(0, ax.get_ylim()[1] * 1.5)   # headroom for the annotation above the null distribution
-            ax.text(0.03, 0.96, f"observed = {obs:.3f}\nnull mean = {null.mean():.3f}\n{format_p(p, len(null))}",
+            ax.text(0.03, 0.96, f"true labels = {obs:.3f}\nnull mean = {null.mean():.3f}\n{format_p(p, len(null))}",
                     transform=ax.transAxes, ha="left", va="top", fontsize=9,
                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.9))
             ax.set_xlabel("Test accuracy")
@@ -357,7 +357,7 @@ def plot_permutation_single(null_acc, observed, p, name, n_test, path):
     edges = (np.arange(n_test + 2) - 0.5) / n_test   # one bin per attainable accuracy k / n_test
     ax.hist(null_acc, bins=edges, color="#9E9E9E", edgecolor="white", linewidth=0.3,
             label=f"Permuted labels ({n_perm:,} permutations)")
-    ax.axvline(observed, color="#C44E52", lw=2.5, label=f"Observed accuracy = {observed:.3f}")
+    ax.axvline(observed, color="#C44E52", lw=2.5, label=f"Accuracy with true labels = {observed:.3f}")
     ax.axvline(null_acc.mean(), ymax=0.72, color="#424242", lw=1, ls="--",
                label=f"Mean with permuted labels = {null_acc.mean():.3f}")   # stops below the legend
     ax.set_xlim(0, 1)
