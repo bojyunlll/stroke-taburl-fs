@@ -81,10 +81,11 @@ FS_MODELS = {
     "SVM_RBF": lambda seed: SVC(kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=seed),
 }
 
-# Classifiers used for the final hold-out evaluation (Table 1, Figures 2-3)
+# Classifiers used for the final hold-out evaluation (Table 1, Figures 2-3).
+# Logistic regression keeps the setting used inside TabuRL-FS (C = 0.01), the model the CpGs were selected for.
 EVAL_MODELS = {
     "LinearSVC": LinearSVC(C=1.0, dual=False, class_weight="balanced", max_iter=5000, random_state=42),
-    "Logistic Regression": LogisticRegression(C=1.0, class_weight="balanced", max_iter=2000, random_state=42),
+    "Logistic Regression": LogisticRegression(C=0.01, class_weight="balanced", max_iter=2000, random_state=42),
     "SVM (RBF)": SVC(kernel="rbf", C=1.0, gamma="scale", class_weight="balanced", random_state=42),
 }
 

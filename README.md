@@ -32,7 +32,8 @@ n = 400: 141 SAD / 132 LAA / 127 CE) using Tabu reinforcement-learning feature s
    that classifier (`--design consensus` instead uses the CpGs selected by at least 2 of the 3 classifiers).
 5. **Evaluation**: stratified 80:20 hold-out split (fold 0 of a 5-fold x 2-repeat stratified CV with
    `random_state=2026`; train n = 320, test n = 80: 29 SAD / 26 LAA / 25 CE; `--split_fold` selects another fold).
-   LinearSVC, Logistic Regression and SVM-RBF (C=1, balanced) are trained on the training set and
+   LinearSVC (C=1), Logistic Regression (C=0.01, the same setting as inside TabuRL-FS) and SVM-RBF (C=1),
+   all `class_weight="balanced"`, are trained on the training set and
    scored on the test set: accuracy, balanced accuracy, macro F1 / precision / recall with
    percentile-bootstrap 95% CIs (2,000 resamples), per-class precision / sensitivity / specificity / F1,
    row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
