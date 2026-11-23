@@ -294,9 +294,10 @@ def label_permutation_null(X, y, tr, te, cols_by_model, n_perm, seed, n_jobs=1):
 
 
 def format_p(p, n_perm):
-    """Empirical p-value text; at the floor 1/(n_perm + 1) it is reported as an upper bound."""
+    """Empirical p-value text. When no permutation reached the observed value, p = 1/(n_perm + 1)
+    (e.g. 1/10,001 = 0.0001), the smallest value attainable with n_perm permutations."""
     if p <= 1 / (n_perm + 1) + 1e-12:
-        return f"p < {1 / n_perm:.{max(1, int(np.ceil(np.log10(n_perm))))}f}"
+        return f"p = {p:.1g}"
     return f"p = {p:.4f}"
 
 
