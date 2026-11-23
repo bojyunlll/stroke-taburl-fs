@@ -13,6 +13,9 @@ Pipeline (matches the Methods section of the manuscript):
      row-normalized confusion matrices, and pairwise exact McNemar tests between classifiers.
      Repeated stratified CV (5-fold x 10, CpGs fixed) gives a second estimate with Nadeau-Bengio corrected
      95% CIs; every permutation is scored the same way, so the CV estimate has its own permutation p-value.
+     A label permutation test after feature selection (selected CpGs fixed, 10,000 permutations) gives the
+     probability that a classifier reaches the observed accuracy on these CpGs by chance; unlike the
+     full-pipeline test it does not account for the feature-selection step.
      Significance is assessed by a full-pipeline permutation test: labels are shuffled and the whole
      pipeline (ANOVA, TabuRL-FS x 3, consensus, evaluation) is re-run; p = (b + 1) / (n_perm + 1).
   5. Hierarchical clustering heatmap of the consensus CpGs.
@@ -51,6 +54,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from joblib import Parallel, delayed
 from scipy.cluster.hierarchy import leaves_list, linkage
 from scipy.spatial.distance import pdist
 from sklearn.base import clone
@@ -261,6 +265,64 @@ def corrected_ci(scores, test_train_ratio=0.25, alpha=0.05):
     return scores.mean(), scores.mean() - half, scores.mean() + half
 
 
+def label_permutation_null(X, y, tr, te, cols_by_model, n_perm, seed, n_jobs=1):
+    """Label permutation test after feature selection (selected CpGs fixed): the labels of all samples are
+    shuffled, each classifier is refit on the training split and scored on the test split. Standardization
+    does not depend on the labels, so it is fitted once. Returns {model: (null accuracies, null balanced
+    accuracies)}; all classifiers see the same permutations."""
+    rng = np.random.default_rng(seed)
+    perms = np.array([rng.permutation(y) for _ in range(n_perm)])
+
+    def one(name, cols):
+        scaler = StandardScaler().fit(X[tr][:, cols])
+        x_tr, x_te = scaler.transform(X[tr][:, cols]), scaler.transform(X[te][:, cols])
+        acc, bal = np.empty(n_perm), np.empty(n_perm)
+        for i, yp in enumerate(perms):
+            pred = clone(EVAL_MODELS[name]).fit(x_tr, yp[tr]).predict(x_te)
+            acc[i] = accuracy_score(yp[te], pred)
+            bal[i] = balanced_accuracy_score(yp[te], pred)
+        return name, acc, bal
+
+    res = Parallel(n_jobs=n_jobs)(delayed(one)(name, cols) for name, cols in cols_by_model.items())
+    return {name: (acc, bal) for name, acc, bal in res}
+
+
+def format_p(p, n_perm):
+    """Empirical p-value text; at the floor 1/(n_perm + 1) it is reported as an upper bound."""
+    if p <= 1 / (n_perm + 1) + 1e-12:
+        return f"p < {1 / n_perm:.{max(1, int(np.ceil(np.log10(n_perm))))}f}"
+    return f"p = {p:.4f}"
+
+
+def plot_label_permutation(null_df, tables, n_test, path):
+    titles = {"consensus": "Consensus CpGs", "own_features": "Classifier-specific CpGs"}
+    designs = [d for d in titles if d in set(null_df.Design)]
+    models = list(EVAL_MODELS)
+    fig, axes = plt.subplots(len(designs), len(models), figsize=(4.3 * len(models), 3.5 * len(designs)), squeeze=False)
+    edges = (np.arange(n_test + 2) - 0.5) / n_test   # one bin per attainable accuracy k / n_test
+    for i, design in enumerate(designs):
+        tab = tables[design].set_index("Model")
+        for j, m in enumerate(models):
+            ax = axes[i, j]
+            null = null_df[(null_df.Design == design) & (null_df.Model == m)].Accuracy.to_numpy()
+            obs, p = tab.loc[m, "Test_accuracy"], tab.loc[m, "Label_permutation_p_accuracy"]
+            ax.hist(null, bins=edges, color="#8C8C8C", edgecolor="none", label="Permuted labels")
+            ax.axvline(obs, color="#C44E52", lw=2, label="Observed")
+            ax.set_xlim(0, 1)
+            ax.set_title(f"{titles[design]}: {m}", fontsize=10)
+            ax.set_ylim(0, ax.get_ylim()[1] * 1.5)   # headroom for the annotation above the null distribution
+            ax.text(0.03, 0.96, f"observed = {obs:.3f}\nnull mean = {null.mean():.3f}\n{format_p(p, len(null))}",
+                    transform=ax.transAxes, ha="left", va="top", fontsize=9,
+                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.9))
+            ax.set_xlabel("Test accuracy")
+            ax.set_ylabel("Number of permutations" if j == 0 else "")
+    axes[0, 0].legend(frameon=False, loc="upper right", fontsize=8)
+    fig.suptitle(f"Label permutation test with the selected CpGs fixed ({len(null):,} permutations, test n = {n_test})")
+    fig.tight_layout()
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def per_class_table(y_true, preds):
     rows = []
     for name, pred in preds.items():
@@ -308,7 +370,12 @@ def plot_metrics(table, path):
     ax.set_ylim(lo, max(0.85, table[metrics].to_numpy().max() + 0.05))
     ax.set_ylabel("Performance score")
     ax.set_title("Figure 3. Comparative performance")
-    if "Permutation_p_accuracy" in table:
+    if "Label_permutation_p_accuracy" in table:
+        n = int(table.N_label_permutations.iloc[0])
+        pvals = ", ".join(f"{r.Model} {format_p(r.Label_permutation_p_accuracy, n)}" for r in table.itertuples())
+        ax.text(0.5, -0.18, f"Label permutation test (selected CpGs fixed, {n:,} permutations): {pvals}",
+                transform=ax.transAxes, ha="center", fontsize=9)
+    elif "Permutation_p_accuracy" in table:
         pvals = ", ".join(f"{r.Model} p={r.Permutation_p_accuracy:.4f}" for r in table.itertuples())
         ax.text(0.5, -0.18, f"Full-pipeline permutation test ({int(table.N_permutations.iloc[0])} permutations): "
                 f"{pvals}", transform=ax.transAxes, ha="center", fontsize=9)
@@ -522,15 +589,38 @@ def phase_evaluate(args):
     preds = predict_holdout(X, y, tr, te, cols)
     ci, diff_ci = bootstrap_ci(y[te], preds, args.n_boot, args.boot_seed)
 
-    # Table 1: overall metrics, bootstrap 95% CIs and full-pipeline permutation p-values
+    # Table 1: overall metrics, bootstrap 95% CIs and full-pipeline permutation p-values,
+    # for the consensus design and for each classifier on its own TabuRL-FS features
     table = results_table(y[te], preds, ci, load_permutation_null(args, "scores"))
-    table.to_csv(out / "table1.csv", index=False)
-    print("Consensus features:\n" + table.round(4).to_string(index=False), flush=True)
-
-    # Same table for the design in which each classifier uses its own TabuRL-FS features
     own = predict_own(X, y, tr, te, selected, lookup)
     own_ci, _ = bootstrap_ci(y[te], own, args.n_boot, args.boot_seed)
     own_table = results_table(y[te], own, own_ci, load_permutation_null(args, "own_scores"))
+
+    # Label permutation test after feature selection (selected CpGs fixed)
+    if args.n_label_perm > 0:
+        t0 = time.time()
+        cols_by_design = design_columns(selected, lookup)
+        null_parts = []
+        for design, tab in (("consensus", table), ("own_features", own_table)):
+            null = label_permutation_null(X, y, tr, te, cols_by_design[design], args.n_label_perm, args.perm_seed,
+                                          args.n_jobs)
+            for k, (metric, col) in enumerate((("Test_accuracy", "Label_permutation_p_accuracy"),
+                                               ("Balanced_accuracy", "Label_permutation_p_balanced_accuracy"))):
+                tab[col] = [(int(np.sum(null[m][k] >= v)) + 1) / (args.n_label_perm + 1)
+                            for m, v in zip(tab.Model, tab[metric])]
+            tab["N_label_permutations"] = args.n_label_perm
+            tab["Label_null_mean_accuracy"] = [null[m][0].mean() for m in tab.Model]
+            for m, (a, b) in null.items():
+                null_parts.append(pd.DataFrame(dict(Design=design, Model=m, Permutation=np.arange(len(a)),
+                                                    Accuracy=a, Balanced_accuracy=b)))
+        null_df = pd.concat(null_parts, ignore_index=True)
+        null_df.to_csv(out / "label_permutation_null.csv.gz", index=False)
+        plot_label_permutation(null_df, {"consensus": table, "own_features": own_table}, len(te),
+                               out / "fig_label_permutation.png")
+        print(f"Label permutation test: {args.n_label_perm} permutations ({time.time() - t0:.0f}s)", flush=True)
+
+    table.to_csv(out / "table1.csv", index=False)
+    print("Consensus features:\n" + table.round(4).to_string(index=False), flush=True)
     own_table.to_csv(out / "table1_own_features.csv", index=False)
     print("Own TabuRL-FS features (classifier matched to the wrapped classifier):\n"
           + own_table.round(4).to_string(index=False), flush=True)
@@ -560,6 +650,7 @@ def phase_evaluate(args):
 
     per_class = per_class_table(y[te], preds)
     per_class.to_csv(out / "per_class_metrics.csv", index=False)
+    per_class_table(y[te], own).to_csv(out / "per_class_metrics_own_features.csv", index=False)
 
     # Pairwise classifier comparison on the same test samples
     comp, names = [], list(preds)
@@ -632,6 +723,8 @@ def main():
     p.add_argument("--perm_seed", type=int, default=0, help="permutation i shuffles labels with seed perm_seed + i")
     p.add_argument("--n_boot", type=int, default=2000, help="[evaluate] bootstrap resamples of the test set")
     p.add_argument("--boot_seed", type=int, default=0)
+    p.add_argument("--n_label_perm", type=int, default=10000,
+                   help="[evaluate] label permutations with the selected CpGs fixed (0 = skip)")
     p.add_argument("--cv_repeats", type=int, default=10,
                    help="[evaluate/permutation] repeats of the stratified 5-fold CV (5 x 10 = 50 folds)")
     p.add_argument("--n_runs", type=int, default=100, help="[recurrence] total number of repeated runs")
