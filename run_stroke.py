@@ -313,10 +313,13 @@ def plot_label_permutation(null_df, tables, n_test, path):
             null = null_df[(null_df.Design == design) & (null_df.Model == m)].Accuracy.to_numpy()
             obs, p = tab.loc[m, "Test_accuracy"], tab.loc[m, "Label_permutation_p_accuracy"]
             ax.hist(null, bins=edges, color="#8C8C8C", edgecolor="none", label="Permuted labels")
-            ax.axvline(obs, color="#C44E52", lw=2, label="True labels")
+            ax.plot([obs], [0], marker="^", ms=9, color="#C44E52", clip_on=False, zorder=5, linestyle="none",
+                    label="True labels")
             ax.set_xlim(0, 1)
             ax.set_title(f"{titles[design]}: {m}", fontsize=10)
             ax.set_ylim(0, ax.get_ylim()[1] * 1.5)   # headroom for the annotation above the null distribution
+            ax.annotate("", xy=(obs, ax.get_ylim()[1] * 0.03), xytext=(obs, ax.get_ylim()[1] * 0.35),
+                        arrowprops=dict(arrowstyle="-|>", color="#C44E52", lw=1.2))
             ax.text(0.03, 0.96, f"true labels = {obs:.3f}\nnull mean = {null.mean():.3f}\n{format_p(p, len(null))}",
                     transform=ax.transAxes, ha="left", va="top", fontsize=9,
                     bbox=dict(facecolor="white", edgecolor="none", alpha=0.9))
@@ -351,23 +354,29 @@ def report_model_table(name, table, ci, cv_table, n_test, n_perm):
 
 
 def plot_permutation_single(null_acc, observed, p, name, n_test, path):
-    """Null distribution of test accuracy under permuted labels for one classifier, with the observed accuracy."""
+    """Null distribution of test accuracy under permuted labels for one classifier; the accuracy with the true
+    labels is marked on the x axis."""
     n_perm = len(null_acc)
     fig, ax = plt.subplots(figsize=(7, 4.2))
     edges = (np.arange(n_test + 2) - 0.5) / n_test   # one bin per attainable accuracy k / n_test
     ax.hist(null_acc, bins=edges, color="#9E9E9E", edgecolor="white", linewidth=0.3,
             label=f"Permuted labels ({n_perm:,} permutations)")
-    ax.axvline(observed, color="#C44E52", lw=2.5, label=f"Accuracy with true labels = {observed:.3f}")
     ax.axvline(null_acc.mean(), ymax=0.72, color="#424242", lw=1, ls="--",
                label=f"Mean with permuted labels = {null_acc.mean():.3f}")   # stops below the legend
     ax.set_xlim(0, 1)
     ax.set_ylim(0, ax.get_ylim()[1] * 1.25)
+    # The accuracy with true labels is a position on the x axis, not a count: mark it on the axis
+    # with a triangle and an arrow so it is not read as a bar of the histogram
+    ymax = ax.get_ylim()[1]
+    ax.plot([observed], [0], marker="^", ms=11, color="#C44E52", clip_on=False, zorder=5, linestyle="none",
+            label=f"Accuracy with true labels = {observed:.3f}")
+    ax.annotate(f"Accuracy with true labels\n= {observed:.3f}, {format_p(p, n_perm)}", xy=(observed, ymax * 0.03),
+                xytext=(observed, ymax * 0.42), ha="center", va="bottom", color="#C44E52", fontsize=10,
+                arrowprops=dict(arrowstyle="-|>", color="#C44E52", lw=1.3, shrinkA=3, shrinkB=2))
     ax.set_xlabel(f"Test accuracy (held-out test set, n = {n_test})")
     ax.set_ylabel("Number of permutations")
     ax.set_title(f"Permutation test: {name}")
     ax.legend(frameon=False, loc="upper left", fontsize=9)
-    ax.text(observed, ax.get_ylim()[1] * 0.55, f"  {format_p(p, n_perm)}", color="#C44E52", fontsize=11,
-            ha="left" if observed < 0.85 else "right", va="center")
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
     fig.tight_layout()
